@@ -506,27 +506,32 @@ function updateRecordCanvas() {
     'inGroup',
   ]);
   canvas.clipPath = artboard;
-  canvasrecord.loadFromJSON(canvassave, function () {
-    if (canvasrecord.getItemById('center_h')) {
-      canvasrecord.remove(canvasrecord.getItemById('center_h'));
-      canvasrecord.remove(canvasrecord.getItemById('center_v'));
-    }
-    if (canvasrecord.getItemById('line_h')) {
-      canvasrecord.remove(canvasrecord.getItemById('line_h'));
-      canvasrecord.remove(canvasrecord.getItemById('line_v'));
-    }
-    canvasrecord.renderAll();
-    canvasrecord.setWidth(artboard.width);
-    canvasrecord.setHeight(artboard.height);
-    canvasrecord.width = artboard.width;
-    canvasrecord.height = artboard.height;
-    canvasrecord.renderAll();
-    objects.forEach(function (object) {
-      replaceSource(
-        canvasrecord.getItemById(object.id),
-        canvasrecord
-      );
-      replaceSource(canvas.getItemById(object.id), canvas);
+  // loadFromJSON is asynchronous (it clears the canvas first, then revives the
+  // objects), so callers that record straight afterwards must await this.
+  return new Promise(function (resolve) {
+    canvasrecord.loadFromJSON(canvassave, function () {
+      if (canvasrecord.getItemById('center_h')) {
+        canvasrecord.remove(canvasrecord.getItemById('center_h'));
+        canvasrecord.remove(canvasrecord.getItemById('center_v'));
+      }
+      if (canvasrecord.getItemById('line_h')) {
+        canvasrecord.remove(canvasrecord.getItemById('line_h'));
+        canvasrecord.remove(canvasrecord.getItemById('line_v'));
+      }
+      canvasrecord.renderAll();
+      canvasrecord.setWidth(artboard.width);
+      canvasrecord.setHeight(artboard.height);
+      canvasrecord.width = artboard.width;
+      canvasrecord.height = artboard.height;
+      canvasrecord.renderAll();
+      objects.forEach(function (object) {
+        replaceSource(
+          canvasrecord.getItemById(object.id),
+          canvasrecord
+        );
+        replaceSource(canvas.getItemById(object.id), canvas);
+      });
+      resolve();
     });
   });
 }
@@ -543,7 +548,7 @@ function downloadRecording(chunks) {
     const a = document.createElement('a');
     a.style.display = 'none';
     a.href = url;
-    a.download = name;
+    a.download = 'video.webm';
     document.body.appendChild(a);
     a.click();
     recording = false;
@@ -1223,6 +1228,7 @@ function setObjectValue(prop, object, value, inst) {
   } else if (prop != 'width') {
     object.set(prop, value);
   }
+  object.setCoords();
   inst.renderAll();
 }
 
@@ -1508,18 +1514,20 @@ async function recordAnimate(time) {
       if (!canvas.getItemById(keyframe.id)) {
         reGroup(keyframe.id);
       }
-      const object = canvas.getItemById(keyframe.id);
+      const object = inst.getItemById(keyframe.id);
+      if (!object) {
+        return;
+      }
       if (
-        currenttime <
+        time <
         p_keyframes.find((x) => x.id == keyframe.id).trimstart +
           p_keyframes.find((x) => x.id == keyframe.id).start
       ) {
         object.set('visible', false);
         inst.renderAll();
       } else if (
-        currenttime >
-          p_keyframes.find((x) => x.id == keyframe.id).end ||
-        currenttime > duration
+        time > p_keyframes.find((x) => x.id == keyframe.id).end ||
+        time > duration
       ) {
         object.set('visible', false);
         inst.renderAll();
@@ -1528,7 +1536,7 @@ async function recordAnimate(time) {
         inst.renderAll();
       }
       if (
-        currenttime >=
+        time >=
         p_keyframes.find((x) => x.id == keyframe.id).trimstart +
           p_keyframes.find((x) => x.id == keyframe.id).start
       ) {
@@ -1573,6 +1581,7 @@ async function recordAnimate(time) {
       } else if (prop != 'width') {
         object.set(prop, value);
       }
+      object.setCoords();
       inst.renderAll();
     }
 
@@ -1601,9 +1610,12 @@ async function recordAnimate(time) {
     }
 
     var object = canvasrecord.getItemById(keyframe.id);
+    if (!object) {
+      return;
+    }
     if (
       keyframe.t >= time &&
-      currenttime >=
+      time >=
         p_keyframes.find((x) => x.id == keyframe.id).trimstart +
           p_keyframes.find((x) => x.id == keyframe.id).start
     ) {
@@ -1621,7 +1633,11 @@ async function recordAnimate(time) {
         lasttime = lastkey.t;
         lastprop = lastkey.value;
       }
-      if (lastkey && lastkey.t >= time && !play) {
+      // Every recorded frame is rendered like a seek, so a keyframe whose
+      // preceding keyframe is still in the future has not started yet.
+      // (This used to read an undeclared `play`, throwing a ReferenceError
+      // and aborting the rest of the frame.)
+      if (lastkey && lastkey.t >= time) {
         return;
       }
 
@@ -1686,24 +1702,28 @@ async function recordAnimate(time) {
 
   objects.forEach(function (object) {
     if (object.id.indexOf('Group') == -1) {
-      const object2 = canvas.getItemById(object.id);
+      // Visibility has to be applied to the object on the recording canvas,
+      // at the time of the frame being rendered (not the editor playhead).
+      const object2 = inst.getItemById(object.id);
+      if (!object2) {
+        return;
+      }
       if (
-        currenttime <
+        time <
         p_keyframes.find((x) => x.id == object.id).trimstart +
           p_keyframes.find((x) => x.id == object.id).start
       ) {
         object2.set('visible', false);
       } else if (
-        currenttime >
-          p_keyframes.find((x) => x.id == object.id).end ||
-        currenttime > duration
+        time > p_keyframes.find((x) => x.id == object.id).end ||
+        time > duration
       ) {
         object2.set('visible', false);
       } else {
         object2.set('visible', true);
       }
       if (
-        currenttime >=
+        time >=
         p_keyframes.find((x) => x.id == object.id).trimstart +
           p_keyframes.find((x) => x.id == object.id).start
       ) {

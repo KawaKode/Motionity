@@ -988,6 +988,11 @@ var canvasrecord = new fabric.Canvas('canvasrecord', {
   backgroundColor: '#FFF',
   width: artboard.width,
   height: artboard.height,
+  // Objects are repositioned to artboard-relative coordinates while
+  // recording. Their cached aCoords are not always refreshed in step, and
+  // fabric's offscreen culling would then skip drawing them entirely,
+  // producing blank frames.
+  skipOffscreen: false,
 });
 
 var timelineslider = document.getElementById('timeline-zoom');

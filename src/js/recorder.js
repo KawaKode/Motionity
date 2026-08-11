@@ -67,11 +67,13 @@ async function exportRecording() {
 
 // Record canvas
 async function record() {
-  updateRecordCanvas();
+  // loadFromJSON clears the record canvas and revives the objects
+  // asynchronously, so nothing may be drawn or captured until it resolves.
+  await updateRecordCanvas();
   if ($('input[name=radio]:checked').val() == 'image') {
     recording = true;
     paused = true;
-    animate(false, currenttime);
+    await recordAnimate(currenttime);
     const dataURL = canvasrecord.toDataURL({
       format: 'png',
     });
@@ -82,12 +84,12 @@ async function record() {
     link.click();
     document.body.removeChild(link);
     recording = false;
+    updateRecordCanvas();
   } else {
     if (!recording) {
       recording = true;
       paused = true;
-      recordAnimate(false, (frame / FPS) * 1000);
-      recording = true;
+      await recordAnimate(0);
       $('#download-real').html('Rendering...');
       $('#download-real').addClass('downloading');
       var fps = 60;
