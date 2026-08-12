@@ -27,7 +27,7 @@
     "@ffmpeg/ffmpeg": "^0.11.6"
   },
   "devDependencies": {
-    "electron": "^40.0.0",
+    "electron": "^43.4.0",
     "electron-builder": "^26.0.0"
   },
   "build": {
@@ -43,7 +43,7 @@
       "scripts/server.cjs",
       "src/**/*",
       "!src/**/*.map",
-      "!node_modules/@ffmpeg/**"
+      "!node_modules/**"
     ],
     "win": {
       "target": [

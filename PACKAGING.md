@@ -36,9 +36,10 @@ Two consequences worth knowing:
   Pixabay, Unsplash and Google Fonts requests the editor makes.
 - The two `@ffmpeg/*` packages are `dependencies`, not `devDependencies`, so the
   Docker vendor stage can `npm ci --omit=dev` without pulling in electron. That
-  would make electron-builder bundle them into the asar as well, so
-  `build.files` excludes `node_modules/@ffmpeg/**` — the copies under
-  `src/vendor/ffmpeg/` are the ones the app loads.
+  makes electron-builder want to bundle them into the asar too, so `build.files`
+  excludes `node_modules/**` outright — the packaged app requires nothing but
+  `electron` and node builtins, and the copies it loads live in
+  `src/vendor/ffmpeg/`.
 
 The Docker build runs `npm ci` and the vendor step inside the image, so it is
 the one target where you can skip both locally.
