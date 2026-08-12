@@ -1,0 +1,43 @@
+; Bare-metal unit for the built-in Node server.
+;
+; Install:
+;   sudo useradd --system --home /opt/motionity --shell /usr/sbin/nologin motionity
+;   sudo cp -r . /opt/motionity && sudo chown -R motionity: /opt/motionity
+;   sudo -u motionity node /opt/motionity/scripts/vendor.mjs
+;   sudo cp deploy/motionity.service /etc/systemd/system/
+;   sudo systemctl enable --now motionity
+;
+; Binds to loopback by default. To serve other machines, put a TLS reverse
+; proxy in front (deploy/nginx.conf or deploy/Caddyfile) — WebCodecs and
+; IndexedDB are unavailable over plain http:// on a non-localhost origin.
+
+[Unit]
+Description=Motionity static server
+After=network.target
+
+[Service]
+Type=simple
+User=motionity
+Group=motionity
+WorkingDirectory=/opt/motionity
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+ExecStart=/usr/bin/node /opt/motionity/scripts/server.cjs
+Restart=on-failure
+RestartSec=2
+
+# The process only ever reads static files.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+MemoryDenyWriteExecute=false
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

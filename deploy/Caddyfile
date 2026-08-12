@@ -1,0 +1,27 @@
+# Serves src/ directly — no Node process needed, and Caddy gets a real
+# certificate automatically, which the app requires away from localhost:
+# WebCodecs (fast export) and IndexedDB (project saving) are secure-context
+# only, so plain http:// on a LAN address silently degrades both.
+#
+#   sudo caddy run --config deploy/Caddyfile
+#
+# Replace the site address with your hostname. For a purely local install use
+# `localhost` and Caddy will install its own trusted certificate.
+
+motionity.example.com {
+	root * /opt/motionity/src
+	file_server
+
+	encode zstd gzip
+
+	@static {
+		path *.js *.css *.svg *.png *.jpg *.jpeg *.gif *.webp *.woff2 *.woff *.mp3 *.wav *.mp4 *.webm
+	}
+	header @static Cache-Control "public, max-age=604800"
+	header /index.html Cache-Control "no-cache"
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}
