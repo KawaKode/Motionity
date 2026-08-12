@@ -1,0 +1,13 @@
+.git
+.github
+.playwright-mcp
+node_modules
+dist
+build
+electron
+test
+deploy
+*.md
+
+# Always re-downloaded inside the build so the image is reproducible.
+src/vendor

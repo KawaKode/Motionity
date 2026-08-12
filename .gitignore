@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/icon.png
+
+# Populated by `npm run vendor` (~19 MB, mostly the ffmpeg asm.js build).
+src/vendor/
+
+.playwright-mcp/
+*.log
