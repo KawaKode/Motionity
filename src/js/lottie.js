@@ -14,7 +14,7 @@ async function newLottieAnimation(x, y, json) {
     strokeWidth: 0,
     cursorDuration: 1,
     cursorDelay: 250,
-    duration: duration * 1000,
+    duration: duration,
     assetType: 'sprite',
     id: 'Sprite' + layer_count,
     objectCaching: false,

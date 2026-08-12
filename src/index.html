@@ -1,15 +1,17 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <link rel="preconnect" href="https://fonts.gstatic.com">
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+        <meta charset="utf-8">
+        <!-- Third-party assets live in vendor/ so the app works offline. -->
+        <!-- Run `npm run vendor` to populate that directory. -->
+        <link rel="stylesheet" href="vendor/inter.css">
         <link rel="stylesheet" href="nice-select.css">
         <link ref="stylesheet" href="range-slider.min.css">
         <link rel="stylesheet" href="magic-check.min.css">
         <link rel="stylesheet" href="styles.css">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/themes/nano.min.css"/>
+        <link rel="stylesheet" href="vendor/pickr-nano.min.css"/>
         <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
-        <link rel="icon" type="image/x-icon" href="/favicon.ico">
+        <link rel="icon" type="image/x-icon" href="favicon.ico">
 				<!-- Primary Meta Tags -->
 <title>Motionity - The web-based motion graphics editor for everyone</title>
 <meta name="title" content="Motionity - The web-based motion graphics editor for everyone">
@@ -78,6 +80,18 @@
               <label for="gif-format">Animated GIF</label>
 							<input class="magic-radio" type="radio" name="radio" value="image" id="image-format">
               <label for="image-format">Image</label>
+            </div>
+            <div id="framerate-row">
+              <p class="subheader">Frame rate</p>
+              <select id="framerate">
+                <option value="12">12 fps</option>
+                <option value="15">15 fps</option>
+                <option value="24">24 fps</option>
+                <option value="25">25 fps</option>
+                <option value="30" selected>30 fps</option>
+                <option value="50">50 fps</option>
+                <option value="60">60 fps</option>
+              </select>
             </div>
             <div id="download-real">Download</div>
         </div>
@@ -168,7 +182,7 @@
 						<div id="filters">
 							<div id="filters-container">
 							<div id="filters-header">
-								<div id="filters-title">Filters</div>
+								<div class="filters-title">Filters</div>
 								<img src="assets/close.svg" id="filters-close">
 							</div>
 							<select id="filters-list">
@@ -183,7 +197,7 @@
 								<option value="Polaroid">Polaroid</option>
 							</select>
 							<hr>
-							<div id="filters-title">Adjustments</div>
+							<div class="filters-title">Adjustments</div>
 							<div id="reset-filters"><img src="assets/repeat.svg"> Reset</div>
 							<div class="filter-row">
 								<th class="name-col">Brightness</th>
@@ -216,7 +230,7 @@
 								</th>
 							</div>
 							<hr>
-							<div id="filters-title">Chroma key</div>
+							<div class="filters-title">Chroma key</div>
 							<div class="filter-row">
 								<th class="name-col">Status</th>
 								<th class="value-col">
@@ -242,7 +256,7 @@
 								</th>
 							</div>
 							<hr>
-							<div id="filters-title">Stylize</div>
+							<div class="filters-title">Stylize</div>
 							<div class="filter-row">
 								<th class="name-col">Noise</th>
 								<th class="value-col">
@@ -289,7 +303,7 @@
             <div id="keyframe-properties">
                 <div id="easing">
                     <p class="property-title">Keyframe easing</p>
-                    <select id="easing">
+                    <select id="easing-select">
                         <option value="linear">Linear</option>
                         <option value="easeInQuad">Ease in</option>
                         <option value="easeOutQuad">Ease out</option>
@@ -366,16 +380,19 @@
         <video id="test-video"></video>
         <input id="emptyInput" value=" " style="opacity:0">
 				<script src="js/libraries/localbase.js"></script>
-				<script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.9.6/lottie.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/@simonwep/selection-js/lib/selection.min.js"></script>
-        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+				<script src="vendor/lottie.min.js"></script>
+        <script src="vendor/selection.min.js"></script>
+        <script src="vendor/jquery.min.js"></script>
         <script src="js/libraries/sortable.min.js"></script>
         <script src="js/libraries/range-slider.min.js"></script>
         <script src="js/libraries/jquery.nice-select.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/pickr.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/460/fabric.min.js"></script>
+        <script src="vendor/pickr.min.js"></script>
+        <script src="vendor/fabric.min.js"></script>
         <script src="js/libraries/anime.min.js"></script>
-        <script src="https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js"></script>
+        <script src="vendor/webfont.js"></script>
+        <!-- ffmpeg.wasm loader; the 23 MB core beside it is fetched on first
+             MP4/GIF export, not at page load. -->
+        <script src="vendor/ffmpeg/ffmpeg.min.js"></script>
         <script src="js/init.js"></script>
         <script src="js/ui.js"></script>
         <script src="js/align.js"></script>
@@ -383,6 +400,8 @@
 				<script src="js/database.js"></script>
 				<script src="js/lottie.js"></script>
 				<script src="js/text.js"></script>
+				<script src="js/webm-writer2.js"></script>
+				<script src="js/render.js"></script>
 				<script src="js/recorder.js"></script>
         <script src="js/functions.js"></script>
         <script src="js/events.js"></script>

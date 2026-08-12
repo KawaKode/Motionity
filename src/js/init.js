@@ -3,7 +3,6 @@ var GOOGLE_FONTS_API_KEY = 'GOOGLE_FONTS_API_KEY';
 
 // for legacy browsers
 const AudioContext = window.AudioContext || window.webkitAudioContext;
-const audioContext = new AudioContext();
 var oldsrc, oldobj;
 var oldtimelinepos;
 var speed = 1;
@@ -58,7 +57,6 @@ var editingpanel = false;
 var files = [];
 var re = /(?:\.([^.]+))?$/;
 var filelist = [];
-var timeout;
 var spacehold = false;
 var spacerelease = false;
 var tempselection;
@@ -94,7 +92,7 @@ var chromaslider, noiseslider, blurslider;
 var isChrome =
   window.chrome && Object.values(window.chrome).length !== 0;
 var eyeDropper;
-if (isChrome) {
+if (isChrome && typeof EyeDropper !== 'undefined') {
   eyeDropper = new EyeDropper();
 }
 var presets = [
@@ -156,20 +154,30 @@ var sliders = [];
 var hovertime = 0;
 var animatedtext = [];
 
-// Get list of fonts
-$.ajax({
-  url:
-    'https://www.googleapis.com/webfonts/v1/webfonts?key=' +
-    GOOGLE_FONTS_API_KEY +
-    '&sort=alpha',
-  type: 'GET',
-  dataType: 'json', // added data type
-  success: function (response) {
-    response.items.forEach(function (item) {
-      fonts.push(item.family);
-    });
-  },
-});
+// Get list of fonts.
+// Both API keys are placeholders in the repository - replace them to enable
+// the Google Fonts list and the Pixabay browser.
+const HAS_FONTS_KEY =
+  GOOGLE_FONTS_API_KEY && GOOGLE_FONTS_API_KEY != 'GOOGLE_FONTS_API_KEY';
+const HAS_PIXABAY_KEY = API_KEY && API_KEY != 'PIXABAY_API';
+if (HAS_FONTS_KEY) {
+  $.ajax({
+    url:
+      'https://www.googleapis.com/webfonts/v1/webfonts?key=' +
+      GOOGLE_FONTS_API_KEY +
+      '&sort=alpha',
+    type: 'GET',
+    dataType: 'json', // added data type
+    success: function (response) {
+      response.items.forEach(function (item) {
+        fonts.push(item.family);
+      });
+    },
+    error: function () {
+      console.warn('Could not load the Google Fonts list');
+    },
+  });
+}
 
 // Panel variants
 const canvas_panel =
@@ -444,6 +452,25 @@ var text_items = {
   ],
 };
 
+// Without a Google Fonts key the font pickers would be empty, so fall back
+// to the families that are already bundled in the text browser.
+// (Declared here because it reads text_items, defined just above.)
+if (!HAS_FONTS_KEY) {
+  Object.keys(text_items).forEach(function (group) {
+    text_items[group].forEach(function (item) {
+      if (fonts.indexOf(item.fontname) == -1) {
+        fonts.push(item.fontname);
+      }
+    });
+  });
+  ['Inter', 'Syne'].forEach(function (name) {
+    if (fonts.indexOf(name) == -1) {
+      fonts.push(name);
+    }
+  });
+  fonts.sort();
+}
+
 WebFont.load({
   google: {
     families: ['Syne'],
@@ -460,7 +487,11 @@ try {
 var canvas2dBackend = new fabric.Canvas2dFilterBackend();
 
 fabric.filterBackend = fabric.initFilterBackend();
-fabric.filterBackend = webglBackend;
+// Only take over the backend if WebGL actually initialized, otherwise filters
+// would silently break on machines without a usable WebGL context.
+if (webglBackend) {
+  fabric.filterBackend = webglBackend;
+}
 
 // Lottie support
 fabric.Lottie = fabric.util.createClass(fabric.Image, {
@@ -491,14 +522,18 @@ fabric.Lottie = fabric.util.createClass(fabric.Image, {
     });
 
     this.lottieItem.addEventListener('enterFrame', (e) => {
-      this.canvas.requestRenderAll();
+      if (this.canvas) {
+        this.canvas.requestRenderAll();
+      }
     });
 
     this.lottieItem.addEventListener('DOMLoaded', () => {
       this.lottieItem.goToAndStop(currenttime, false);
       this.lottieItem.duration =
         this.lottieItem.getDuration(false) * 1000;
-      this.canvas.requestRenderAll();
+      if (this.canvas) {
+        this.canvas.requestRenderAll();
+      }
       canvas.renderAll();
       canvas.fire('lottie:loaded', { any: 'payload' });
     });
@@ -508,7 +543,9 @@ fabric.Lottie = fabric.util.createClass(fabric.Image, {
 
   goToSeconds: function (seconds) {
     this.lottieItem.goToAndStop(seconds, false);
-    this.canvas.requestRenderAll();
+    if (this.canvas) {
+      this.canvas.requestRenderAll();
+    }
   },
   goToFrame: function (frame) {
     this.lottieItem.goToAndStop(frame, true);
@@ -758,30 +795,23 @@ textBoxControls.mr = new fabric.Control({
 
 // Get any object by ID
 fabric.Canvas.prototype.getItemById = function (name) {
-  var object = null,
-    objects = this.getObjects();
-  for (var i = 0, len = this.size(); i < len; i++) {
-    if (objects[i].get('type') == 'group') {
-      if (objects[i].get('id') && objects[i].get('id') === name) {
-        object = objects[i];
-        break;
+  function search(list) {
+    for (var i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (item.id && item.id === name) {
+        return item;
       }
-      var wip = i;
-      for (var o = 0; o < objects[i]._objects.length; o++) {
-        if (
-          objects[wip]._objects[o].id &&
-          objects[wip]._objects[o].id === name
-        ) {
-          object = objects[wip]._objects[o];
-          break;
+      // Recurse so groups nested more than one level deep are found too
+      if (item._objects && item._objects.length > 0) {
+        const found = search(item._objects);
+        if (found) {
+          return found;
         }
       }
-    } else if (objects[i].id && objects[i].id === name) {
-      object = objects[i];
-      break;
     }
+    return null;
   }
-  return object;
+  return search(this.getObjects());
 };
 
 // Create the artboard

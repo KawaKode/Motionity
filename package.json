@@ -1,0 +1,109 @@
+{
+  "name": "motionity",
+  "productName": "Motionity",
+  "version": "1.0.0",
+  "description": "Web-based motion graphics editor with keyframing, masking, filters and text animations",
+  "license": "MIT",
+  "author": "Kawa",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "icons": "node scripts/make-icon.cjs",
+    "start": "node scripts/server.cjs",
+    "dev": "electron .",
+    "dist:win": "npm run vendor && npm run icons && electron-builder --win",
+    "dist:appimage": "npm run vendor && npm run icons && electron-builder --linux AppImage",
+    "dist:flatpak": "npm run vendor && npm run icons && electron-builder --linux flatpak",
+    "dist:linux": "npm run vendor && npm run icons && electron-builder --linux AppImage flatpak",
+    "docker:build": "docker build -t motionity:latest .",
+    "docker:run": "docker run --rm -p 8080:8080 motionity:latest",
+    "release:build": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "release:binaries": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -BinariesOnly",
+    "release": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -PublishRelease",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@ffmpeg/core-st": "^0.11.1",
+    "@ffmpeg/ffmpeg": "^0.11.6"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "app.motionity.desktop",
+    "productName": "Motionity",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "scripts/server.cjs",
+      "src/**/*",
+      "!src/**/*.map",
+      "!node_modules/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Motionity"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "flatpak"
+      ],
+      "icon": "build/icon.png",
+      "category": "Graphics",
+      "synopsis": "Motion graphics editor",
+      "desktop": {
+        "entry": {
+          "Name": "Motionity",
+          "Categories": "Graphics;AudioVideo;VideoEditor;"
+        }
+      }
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "flatpak": {
+      "runtimeVersion": "23.08",
+      "baseVersion": "23.08",
+      "finishArgs": [
+        "--share=ipc",
+        "--socket=x11",
+        "--socket=wayland",
+        "--socket=pulseaudio",
+        "--device=dri",
+        "--share=network",
+        "--filesystem=xdg-download",
+        "--filesystem=xdg-documents",
+        "--filesystem=xdg-pictures",
+        "--filesystem=xdg-videos",
+        "--filesystem=xdg-music"
+      ]
+    }
+  }
+}

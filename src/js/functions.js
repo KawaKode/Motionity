@@ -26,7 +26,7 @@ function updateSelection(e) {
         $(".layer[data-object='" + object.get('id') + "']").addClass(
           'layer-selected'
         );
-        if (e.e != undefined) {
+        if (e.e != undefined && $('.layer-selected').length > 0) {
           document
             .getElementsByClassName('layer-selected')[0]
             .scrollIntoView();
@@ -42,7 +42,7 @@ function updateSelection(e) {
       $(".layer[data-object='" + e.target.get('id') + "']").addClass(
         'layer-selected'
       );
-      if (e.e != undefined) {
+      if (e.e != undefined && $('.layer-selected').length > 0) {
         document
           .getElementsByClassName('layer-selected')[0]
           .scrollIntoView();
@@ -244,7 +244,6 @@ function group() {
     absolutePositioned: true,
     inGroup: false,
     strokeDashArray: false,
-    objectCaching: true,
     shadow: {
       color: 'black',
       offsetX: 0,
@@ -257,18 +256,7 @@ function group() {
   canvas.renderAll();
   newLayer(newgroup);
   canvas.setActiveObject(newgroup);
-  keyframes.sort(function (a, b) {
-    if (a.id.indexOf('Group') >= 0 && b.id.indexOf('Group') == -1) {
-      return 1;
-    } else if (
-      b.id.indexOf('Group') >= 0 &&
-      a.id.indexOf('Group') == -1
-    ) {
-      return -1;
-    } else {
-      return 0;
-    }
-  });
+  sortKeyframes();
   save();
 }
 $(document).on('click', '#group-objects', group);
@@ -348,11 +336,19 @@ $(document).on('click', '#ungroup-objects', function () {
 function reGroup(id) {
   var group = [];
   var objects = [];
-  groups
-    .find((x) => x.id == id)
-    .objects.forEach(function (object) {
-      objects.push(canvas.getItemById(object));
-    });
+  const entry = groups.find((x) => x.id == id);
+  if (!entry) {
+    return;
+  }
+  entry.objects.forEach(function (object) {
+    const item = canvas.getItemById(object);
+    if (item) {
+      objects.push(item);
+    }
+  });
+  if (objects.length == 0) {
+    return;
+  }
   var activeselection = new fabric.ActiveSelection(objects);
   var newgroup = activeselection.toGroup();
   newgroup.set({
@@ -364,14 +360,20 @@ function reGroup(id) {
 }
 
 // Keep record canvas up to date
-function updateRecordCanvas() {
+async function updateRecordCanvas() {
   canvasrecord.setWidth(artboard.width);
   canvasrecord.setHeight(artboard.height);
   canvasrecord.width = artboard.width;
   canvasrecord.height = artboard.height;
   canvas.clipPath = null;
-  objects.forEach(async function (object) {
+  // Sequential, not forEach(async): the snapshot below must not be taken
+  // while filters are still being stripped off the objects.
+  for (const object of objects) {
     var obj = canvas.getItemById(object.id);
+    if (!obj) {
+      object.filters = [];
+      continue;
+    }
     if (obj.filters) {
       if (obj.filters.length > 0) {
         object.filters = [];
@@ -449,7 +451,7 @@ function updateRecordCanvas() {
     } else {
       object.filters = [];
     }
-  });
+  }
   const canvassave = canvas.toJSON([
     'volume',
     'audioSrc',
@@ -536,10 +538,75 @@ function updateRecordCanvas() {
   });
 }
 
+// Frame rate the user picked in the download modal, used by every export path
+const EXPORT_FPS_DEFAULT = 30;
+
+function getExportFramerate() {
+  const fps = parseInt($('#framerate').val(), 10);
+  if (!(fps > 0)) {
+    return EXPORT_FPS_DEFAULT;
+  }
+  return Math.min(120, fps);
+}
+
+// A still image has no frame rate
+$('input[name=radio]').on('change', function () {
+  $('#framerate-row').toggle(
+    $('input[name=radio]:checked').val() != 'image'
+  );
+});
+
+// Put the editor back into a usable state once a render has finished (or failed)
+function resetRecordingUI() {
+  recording = false;
+  currenttime = 0;
+  animate(false, 0);
+  $('#seekbar').offset({
+    left:
+      offset_left +
+      $('#inner-timeline').offset().left +
+      currenttime / timelinetime,
+  });
+  canvas.renderAll();
+  resizeCanvas();
+  if (background_audio != false) {
+    background_audio.pause();
+    background_audio = new Audio(background_audio.src);
+  }
+  $('#download-real').html('Download');
+  $('#download-real').removeClass('downloading');
+  updateRecordCanvas();
+}
+
+// Hand a finished WebM recording to the user, converting it first if the
+// chosen format is not webm.
+function deliverRecording(blob) {
+  $('#download-real').html('Downloading...');
+  const format = $('input[name=radio]:checked').val();
+  if (format == 'mp4' || format == 'gif') {
+    convertStreams(blob, format);
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = 'video.webm';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Give the browser a tick to start the download before releasing the blob
+  window.setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 60000);
+  resetRecordingUI();
+}
+
 // Download recording
 function downloadRecording(chunks) {
   $('#download-real').html('Downloading...');
-  if ($('input[name=radio]:checked').val() == 'webm') {
+  const format = $('input[name=radio]:checked').val();
+  if (format == 'webm') {
     var url = URL.createObjectURL(
       new Blob(chunks, {
         type: 'video/webm',
@@ -551,24 +618,21 @@ function downloadRecording(chunks) {
     a.download = 'video.webm';
     document.body.appendChild(a);
     a.click();
-    recording = false;
-    currenttime = 0;
-    animate(false, 0);
-    $('#seekbar').offset({
-      left:
-        offset_left +
-        $('#inner-timeline').offset().left +
-        currenttime / timelinetime,
-    });
-    canvas.renderAll();
-    resizeCanvas();
-    $('#download-real').html('Download');
-    $('#download-real').removeClass('downloading');
-    updateRecordCanvas();
-  } else if ($('input[name=radio]:checked').val() == 'mp4') {
-    type = 'video/mp4';
+    document.body.removeChild(a);
+    // Give the browser a tick to start the download before releasing the blob
+    window.setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 60000);
+    resetRecordingUI();
+  } else if (format == 'mp4' || format == 'gif') {
+    // Both are transcoded from the captured webm by the ffmpeg worker
+    convertStreams(
+      new Blob(chunks, { type: 'video/webm' }),
+      format
+    );
   } else {
-    convertStreams(new Blob(chunks, { type: 'video/webm' }), 'gif');
+    console.warn('Unknown download format: ' + format);
+    resetRecordingUI();
   }
 }
 
@@ -653,8 +717,19 @@ function save() {
     $('#redo').removeClass('history-active');
   }
 
-  updateRecordCanvas();
-  autoSave();
+  schedulePersist();
+}
+
+// Rebuilding the record canvas and writing to IndexedDB are both expensive
+// and used to run on every single edit (including every keystroke). Coalesce
+// them; record() awaits updateRecordCanvas() directly when it needs it fresh.
+var persistTimer;
+function schedulePersist() {
+  window.clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(function () {
+    updateRecordCanvas();
+    autoSave();
+  }, 400);
 }
 
 // Duplicate object
@@ -664,6 +739,8 @@ function copyObject() {
       if (clipboard.type == 'activeSelection') {
         clipboard._objects.forEach(function (clone) {
           clone.clone(function (cloned) {
+            // layer_count only advances inside newLayer, so read it after
+            // the clone resolves or every copy shares one id.
             cloned.set({
               id: 'Shape' + layer_count,
             });
@@ -899,12 +976,14 @@ function undoRedo(newState, saveState, newArrState, saveArrState) {
   canvas.clipPath = null;
   canvas.loadFromJSON(state, function () {
     canvas.clipPath = artboard;
-    canvas.getItemById('line_h').set({ opacity: 0 });
-    canvas.getItemById('line_v').set({ opacity: 0 });
+    hideGuides(canvas);
     canvas.renderAll();
     $('.object-props').remove();
     $('.layer').remove();
     objects.forEach(function (object) {
+      if (!canvas.getItemById(object.id)) {
+        return;
+      }
       replaceSource(canvas.getItemById(object.id), canvas);
       renderLayer(canvas.getItemById(object.id));
       props.forEach(function (prop) {
@@ -924,6 +1003,9 @@ function undoRedo(newState, saveState, newArrState, saveArrState) {
       });
     });
     keyframes.forEach(function (keyframe) {
+      if (!canvas.getItemById(keyframe.id)) {
+        return;
+      }
       if (
         keyframe.name != 'top' &&
         keyframe.name != 'scaleY' &&
@@ -963,7 +1045,7 @@ $(document).on('click', '#undo', function () {
   }
 });
 $(document).on('click', '#redo', function () {
-  if (undo.length >= 1) {
+  if (redo.length >= 1) {
     undoRedo(redo, undo, redoarr, undoarr);
   }
 });
@@ -1048,7 +1130,7 @@ function keyframeChanges(object, type, id, selection) {
         'height',
         object,
         currenttime,
-        object.get('width'),
+        object.get('height'),
         true
       );
       if (selection) {
@@ -1193,6 +1275,43 @@ function pause() {
   $('#play-button').attr('src', 'assets/play-button.svg');
 }
 
+// Write an object's stored default for a property, creating the entry if the
+// object was serialized before that property existed.
+function setDefaultValue(object, prop, value) {
+  const entry = objects.find((x) => x.id == object.get('id'));
+  if (!entry) {
+    return;
+  }
+  if (!entry.defaults) {
+    entry.defaults = [];
+  }
+  const def = entry.defaults.find((x) => x.name == prop);
+  if (def) {
+    def.value = value;
+  } else {
+    entry.defaults.push({ name: prop, value: value });
+  }
+}
+
+// Read an object's stored default for a property (undefined when absent)
+function getDefaultValue(id, prop) {
+  const entry = objects.find((x) => x.id == id);
+  if (!entry || !entry.defaults) {
+    return undefined;
+  }
+  const def = entry.defaults.find((x) => x.name == prop);
+  return def ? def.value : undefined;
+}
+
+// Read a property that may be a "shadow.*" path.
+// fabric's get() is flat, so object.get("shadow.blur") is always undefined.
+function getPropValue(object, prop) {
+  if (typeof prop === 'string' && prop.indexOf('shadow.') === 0) {
+    return object.shadow ? object.shadow[prop.slice(7)] : undefined;
+  }
+  return object.get(prop);
+}
+
 // Set object value (while animating)
 function setObjectValue(prop, object, value, inst) {
   if (object.get('type') != 'group') {
@@ -1221,8 +1340,6 @@ function setObjectValue(prop, object, value, inst) {
     object.shadow.offsetX = value;
   } else if (prop == 'shadow.offsetY') {
     object.shadow.offsetY = value;
-  } else if (prop == 'shadow.blur') {
-    object.shadow.blur = value;
   } else if (object.get('type') != 'group') {
     object.set(prop, value);
   } else if (prop != 'width') {
@@ -1232,34 +1349,68 @@ function setObjectValue(prop, object, value, inst) {
   inst.renderAll();
 }
 
-// Find last keyframe in time from same object & property
-function lastKeyframe(keyframe, index) {
-  var temparr = keyframes.slice();
-  temparr.sort(function (a, b) {
-    return a.t - b.t;
-  });
-  temparr.length = temparr.findIndex((x) => x === keyframe);
-  temparr.reverse();
-  if (temparr.length == 0) {
-    return false;
-  } else {
-    for (var i = 0; i < temparr.length; i++) {
-      if (
-        temparr[i].id == keyframe.id &&
-        temparr[i].name == keyframe.name
-      ) {
-        return temparr[i];
-        break;
-      } else if (i == temparr.length - 1) {
-        return false;
-      }
+// Group keyframes by "id|name", each group sorted by time.
+// Built once per rendered frame: without it every keyframe lookup sorted a
+// copy of the whole keyframe list, making playback O(n^2 log n).
+function buildKeyframeIndex() {
+  const idx = new Map();
+  keyframes.forEach(function (keyframe) {
+    const key = keyframe.id + '|' + keyframe.name;
+    let arr = idx.get(key);
+    if (!arr) {
+      arr = [];
+      idx.set(key, arr);
     }
+    arr.push(keyframe);
+  });
+  idx.forEach(function (arr) {
+    arr.sort(function (a, b) {
+      return a.t - b.t;
+    });
+  });
+  return idx;
+}
+
+// All keyframes of one object/property, sorted by time
+function keyframeSiblings(keyframe, idx) {
+  if (idx) {
+    return idx.get(keyframe.id + '|' + keyframe.name) || [];
   }
+  return keyframes
+    .filter(function (e) {
+      return e.id == keyframe.id && e.name == keyframe.name;
+    })
+    .sort(function (a, b) {
+      return a.t - b.t;
+    });
+}
+
+// Find last keyframe in time from same object & property
+function lastKeyframe(keyframe, idx) {
+  const arr = keyframeSiblings(keyframe, idx);
+  const pos = arr.indexOf(keyframe);
+  if (pos <= 0) {
+    return false;
+  }
+  return arr[pos - 1];
+}
+
+// Find next keyframe in time from same object & property
+function nextKeyframe(keyframe, idx) {
+  const arr = keyframeSiblings(keyframe, idx);
+  const pos = arr.indexOf(keyframe);
+  if (pos == -1 || pos == arr.length - 1) {
+    return false;
+  }
+  return arr[pos + 1];
 }
 
 // Check whether any keyframe exists for a certain property
-function checkAnyKeyframe(id, prop, inst) {
+function checkAnyKeyframe(id, prop, inst, idx) {
   const object = inst.getItemById(id);
+  if (!object) {
+    return false;
+  }
   if (object.get('assetType') == 'audio') {
     return false;
   }
@@ -1279,13 +1430,14 @@ function checkAnyKeyframe(id, prop, inst) {
   ) {
     return false;
   }
-  const keyarr2 = $.grep(keyframes, function (e) {
-    return e.id == id && e.name == prop;
-  });
-  if (keyarr2.length == 0) {
-    const value = objects
-      .find((x) => x.id == id)
-      .defaults.find((x) => x.name == prop).value;
+  const hasKeyframe = idx
+    ? idx.has(id + '|' + prop)
+    : keyframes.some((e) => e.id == id && e.name == prop);
+  if (!hasKeyframe) {
+    const value = getDefaultValue(id, prop);
+    if (value === undefined) {
+      return false;
+    }
     setObjectValue(prop, object, value, inst);
   }
 }
@@ -1299,23 +1451,18 @@ function isDomElem(el) {
 
 // Play videos when seeking/playing
 async function playVideos(time) {
-  objects.forEach(async function (object) {
-    var object = canvas.getItemById(object.id);
-    if (object == null) {
+  objects.forEach(async function (entry) {
+    var inst = recording ? canvasrecord : canvas;
+    var object = inst.getItemById(entry.id);
+    var p_keyframe = p_keyframes.find((x) => x.id == entry.id);
+    if (object == null || !p_keyframe) {
       return false;
     }
-    var inst = canvas;
     var start = false;
-    if (recording) {
-      object = canvasrecord.getItemById(object.id);
-      inst = canvasrecord;
-    }
     if (
       object.get('id').indexOf('Video') >= 0 &&
-      p_keyframes.find((x) => x.id == object.id).trimstart +
-        p_keyframes.find((x) => x.id == object.id).start <=
-        time &&
-      p_keyframes.find((x) => x.id == object.id).end >= time
+      p_keyframe.trimstart + p_keyframe.start <= time &&
+      p_keyframe.end >= time
     ) {
       var tempfilters = object.filters;
       if (object.filters.length > 0) {
@@ -1334,9 +1481,7 @@ async function playVideos(time) {
       if ($(object.getElement())[0].paused == true) {
         $(object.getElement())[0].currentTime = parseFloat(
           (
-            (time -
-              p_keyframes.find((x) => x.id == object.id).start +
-              p_keyframes.find((x) => x.id == object.id).trimstart) /
+            (time - p_keyframe.start + p_keyframe.trimstart) /
             1000
           ).toFixed(2)
         );
@@ -1394,10 +1539,7 @@ async function playVideos(time) {
         if (paused) {
           $(object.getElement())[0].currentTime = parseFloat(
             (
-              (time -
-                p_keyframes.find((x) => x.id == object.id).start +
-                p_keyframes.find((x) => x.id == object.id)
-                  .trimstart) /
+              (time - p_keyframe.start + p_keyframe.trimstart) /
               1000
             ).toFixed(2)
           );
@@ -1424,10 +1566,11 @@ async function playVideos(time) {
 
 // Play background audio
 function playAudio(time) {
-  objects.forEach(async function (object) {
+  objects.forEach(function (object) {
     var start = false;
     var obj = canvas.getItemById(object.id);
-    if (obj.get('assetType') == 'audio') {
+    var p_keyframe = p_keyframes.find((x) => x.id == object.id);
+    if (obj && p_keyframe && obj.get('assetType') == 'audio') {
       var flag = false;
       var animation = {
         value: 0,
@@ -1439,20 +1582,20 @@ function playAudio(time) {
         duration: duration,
         easing: 'linear',
         autoplay: true,
-        update: async function () {
-          if (start && play && !paused) {
+        update: function () {
+          // `paused` is the only playback flag here; `play` used to be read
+          // as a variable but resolves to the global play() function, so the
+          // condition was always true.
+          if (start && !paused) {
             if (
               !flag &&
-              p_keyframes.find((x) => x.id == object.id).start <=
-                currenttime &&
-              p_keyframes.find((x) => x.id == object.id).end >=
-                currenttime
+              p_keyframe.start <= currenttime &&
+              p_keyframe.end >= currenttime
             ) {
               if (obj.get('src')) {
                 obj.get('src').currentTime =
-                  (p_keyframes.find((x) => x.id == object.id)
-                    .trimstart -
-                    p_keyframes.find((x) => x.id == object.id).start +
+                  (p_keyframe.trimstart -
+                    p_keyframe.start +
                     currenttime) /
                   1000;
                 obj.get('src').volume = obj.get('volume');
@@ -1464,19 +1607,16 @@ function playAudio(time) {
                 audio.volume = obj.get('volume');
                 audio.crossOrigin = 'anonymous';
                 audio.currentTime =
-                  (p_keyframes.find((x) => x.id == object.id)
-                    .trimstart -
-                    p_keyframes.find((x) => x.id == object.id).start +
+                  (p_keyframe.trimstart -
+                    p_keyframe.start +
                     currenttime) /
                   1000;
                 audio.play();
                 flag = true;
               }
             } else if (
-              p_keyframes.find((x) => x.id == object.id).start >=
-                currenttime ||
-              p_keyframes.find((x) => x.id == object.id).end <=
-                currenttime
+              p_keyframe.start >= currenttime ||
+              p_keyframe.end <= currenttime
             ) {
               if (obj.get('src')) {
                 obj.get('src').pause();
@@ -1502,6 +1642,7 @@ async function recordAnimate(time) {
   anime.speed = 1;
   //return new Promise(function(resolve){
   var inst = canvasrecord;
+  const idx = buildKeyframeIndex();
   if (animatedtext.length > 0) {
     animatedtext.forEach(function (text) {
       text.seek(time, inst);
@@ -1515,33 +1656,23 @@ async function recordAnimate(time) {
         reGroup(keyframe.id);
       }
       const object = inst.getItemById(keyframe.id);
-      if (!object) {
+      const p_keyframe = p_keyframes.find((x) => x.id == keyframe.id);
+      if (!object || !p_keyframe) {
         return;
       }
-      if (
-        time <
-        p_keyframes.find((x) => x.id == keyframe.id).trimstart +
-          p_keyframes.find((x) => x.id == keyframe.id).start
-      ) {
+      if (time < p_keyframe.trimstart + p_keyframe.start) {
         object.set('visible', false);
         inst.renderAll();
-      } else if (
-        time > p_keyframes.find((x) => x.id == keyframe.id).end ||
-        time > duration
-      ) {
+      } else if (time > p_keyframe.end || time > duration) {
         object.set('visible', false);
         inst.renderAll();
       } else {
         object.set('visible', true);
         inst.renderAll();
       }
-      if (
-        time >=
-        p_keyframes.find((x) => x.id == keyframe.id).trimstart +
-          p_keyframes.find((x) => x.id == keyframe.id).start
-      ) {
+      if (time >= p_keyframe.trimstart + p_keyframe.start) {
         props.forEach(function (prop) {
-          checkAnyKeyframe(keyframe.id, prop, inst);
+          checkAnyKeyframe(keyframe.id, prop, inst, idx);
         });
       }
     }
@@ -1574,8 +1705,6 @@ async function recordAnimate(time) {
         object.shadow.offsetX = value;
       } else if (prop == 'shadow.offsetY') {
         object.shadow.offsetY = value;
-      } else if (prop == 'shadow.blur') {
-        object.shadow.blur = value;
       } else if (object.get('type') != 'group') {
         object.set(prop, value);
       } else if (prop != 'width') {
@@ -1583,30 +1712,6 @@ async function recordAnimate(time) {
       }
       object.setCoords();
       inst.renderAll();
-    }
-
-    // Find next keyframe in time from same object & property
-    function nextKeyframe(keyframe, index) {
-      var temparr = keyframes.slice();
-      temparr.sort(function (a, b) {
-        return a.t - b.t;
-      });
-      temparr.splice(0, temparr.findIndex((x) => x === keyframe) + 1);
-      if (temparr.length == 0) {
-        return false;
-      } else {
-        for (var i = 0; i < temparr.length; i++) {
-          if (
-            temparr[i].id == keyframe.id &&
-            temparr[i].name == keyframe.name
-          ) {
-            return temparr[i];
-            break;
-          } else if (i == temparr.length - 1) {
-            return false;
-          }
-        }
-      }
     }
 
     var object = canvasrecord.getItemById(keyframe.id);
@@ -1623,12 +1728,13 @@ async function recordAnimate(time) {
       var start = false;
       var lasttime, lastprop;
       // Find last keyframe in time from same object & property
-      var lastkey = lastKeyframe(keyframe, index);
+      var lastkey = lastKeyframe(keyframe, idx);
       if (!lastkey) {
         lasttime = 0;
-        lastprop = objects
-          .find((x) => x.id == keyframe.id)
-          .defaults.find((x) => x.name == keyframe.name).value;
+        lastprop = getDefaultValue(keyframe.id, keyframe.name);
+        if (lastprop === undefined) {
+          return;
+        }
       } else {
         lasttime = lastkey.t;
         lastprop = lastkey.value;
@@ -1674,7 +1780,7 @@ async function recordAnimate(time) {
       ) {
         setValue(keyframe.name, object, animation.value, inst);
       }
-    } else if (keyframe.t < time && !nextKeyframe(keyframe, index)) {
+    } else if (keyframe.t < time && !nextKeyframe(keyframe, idx)) {
       var prop = keyframe.name;
       if (prop == 'shadow.blur') {
         if (object.shadow.blur != keyframe.value) {
@@ -1705,37 +1811,31 @@ async function recordAnimate(time) {
       // Visibility has to be applied to the object on the recording canvas,
       // at the time of the frame being rendered (not the editor playhead).
       const object2 = inst.getItemById(object.id);
-      if (!object2) {
+      const p_keyframe = p_keyframes.find((x) => x.id == object.id);
+      if (!object2 || !p_keyframe) {
         return;
       }
-      if (
-        time <
-        p_keyframes.find((x) => x.id == object.id).trimstart +
-          p_keyframes.find((x) => x.id == object.id).start
-      ) {
+      if (time < p_keyframe.trimstart + p_keyframe.start) {
         object2.set('visible', false);
-      } else if (
-        time > p_keyframes.find((x) => x.id == object.id).end ||
-        time > duration
-      ) {
+      } else if (time > p_keyframe.end || time > duration) {
         object2.set('visible', false);
       } else {
         object2.set('visible', true);
       }
-      if (
-        time >=
-        p_keyframes.find((x) => x.id == object.id).trimstart +
-          p_keyframes.find((x) => x.id == object.id).start
-      ) {
+      if (time >= p_keyframe.trimstart + p_keyframe.start) {
         props.forEach(function (prop) {
-          checkAnyKeyframe(object.id, prop, inst);
+          checkAnyKeyframe(object.id, prop, inst, idx);
         });
       }
     }
   });
   inst.renderAll();
 
-  playVideos(time);
+  // The offline renderer seeks each video layer to the exact frame time
+  // itself; playVideos() would fight it by starting real-time playback.
+  if (!offlinerender) {
+    playVideos(time);
+  }
   //});
 }
 
@@ -1743,52 +1843,27 @@ async function recordAnimate(time) {
 async function animate(play, time) {
   anime.speed = speed;
   if (!draggingPanel) {
-    var starttime = new Date();
     var offset = time;
     var inst = canvas;
+    const idx = buildKeyframeIndex();
     keyframes.forEach(function (keyframe, index) {
-      // Find next keyframe in time from same object & property
-      function nextKeyframe(keyframe, index) {
-        var temparr = keyframes.slice();
-        temparr.sort(function (a, b) {
-          return a.t - b.t;
-        });
-        temparr.splice(
-          0,
-          temparr.findIndex((x) => x === keyframe) + 1
-        );
-        if (temparr.length == 0) {
-          return false;
-        } else {
-          for (var i = 0; i < temparr.length; i++) {
-            if (
-              temparr[i].id == keyframe.id &&
-              temparr[i].name == keyframe.name
-            ) {
-              return temparr[i];
-              break;
-            } else if (i == temparr.length - 1) {
-              return false;
-            }
-          }
-        }
-      }
       // Regroup if needed (groups break to animate their children, then regroup after children have animated)
       if (groups.find((x) => x.id == keyframe.id)) {
         if (!canvas.getItemById(keyframe.id)) {
           reGroup(keyframe.id);
         }
         const object = canvas.getItemById(keyframe.id);
-        if (
-          currenttime <
-          p_keyframes.find((x) => x.id == keyframe.id).trimstart +
-            p_keyframes.find((x) => x.id == keyframe.id).start
-        ) {
+        const p_keyframe = p_keyframes.find(
+          (x) => x.id == keyframe.id
+        );
+        if (!object || !p_keyframe) {
+          return;
+        }
+        if (currenttime < p_keyframe.trimstart + p_keyframe.start) {
           object.set('visible', false);
           inst.renderAll();
         } else if (
-          currenttime >
-            p_keyframes.find((x) => x.id == keyframe.id).end ||
+          currenttime > p_keyframe.end ||
           currenttime > duration
         ) {
           object.set('visible', false);
@@ -1797,13 +1872,9 @@ async function animate(play, time) {
           object.set('visible', true);
           inst.renderAll();
         }
-        if (
-          currenttime >=
-          p_keyframes.find((x) => x.id == keyframe.id).trimstart +
-            p_keyframes.find((x) => x.id == keyframe.id).start
-        ) {
+        if (currenttime >= p_keyframe.trimstart + p_keyframe.start) {
           props.forEach(function (prop) {
-            checkAnyKeyframe(keyframe.id, prop, inst);
+            checkAnyKeyframe(keyframe.id, prop, inst, idx);
           });
         }
       }
@@ -1845,8 +1916,6 @@ async function animate(play, time) {
           object.shadow.offsetX = value;
         } else if (prop == 'shadow.offsetY') {
           object.shadow.offsetY = value;
-        } else if (prop == 'shadow.blur') {
-          object.shadow.blur = value;
         } else if (object.get('type') != 'group') {
           object.set(prop, value);
         } else if (prop != 'width') {
@@ -1856,22 +1925,28 @@ async function animate(play, time) {
       }
 
       var object = canvas.getItemById(keyframe.id);
+      var kf_p_keyframe = p_keyframes.find(
+        (x) => x.id == keyframe.id
+      );
+      if (!object || !kf_p_keyframe) {
+        return;
+      }
       if (
         keyframe.t >= time &&
         currenttime >=
-          p_keyframes.find((x) => x.id == keyframe.id).trimstart +
-            p_keyframes.find((x) => x.id == keyframe.id).start
+          kf_p_keyframe.trimstart + kf_p_keyframe.start
       ) {
         var delay = 0;
         var start = false;
         var lasttime, lastprop;
         // Find last keyframe in time from same object & property
-        var lastkey = lastKeyframe(keyframe, index);
+        var lastkey = lastKeyframe(keyframe, idx);
         if (!lastkey) {
           lasttime = 0;
-          lastprop = objects
-            .find((x) => x.id == keyframe.id)
-            .defaults.find((x) => x.name == keyframe.name).value;
+          lastprop = getDefaultValue(keyframe.id, keyframe.name);
+          if (lastprop === undefined) {
+            return;
+          }
         } else {
           lasttime = lastkey.t;
           lastprop = lastkey.value;
@@ -1900,12 +1975,8 @@ async function animate(play, time) {
             if (start && !paused) {
               if (
                 currenttime <
-                  p_keyframes.find((x) => x.id == keyframe.id)
-                    .trimstart +
-                    p_keyframes.find((x) => x.id == keyframe.id)
-                      .start ||
-                currenttime >
-                  p_keyframes.find((x) => x.id == keyframe.id).end ||
+                  kf_p_keyframe.trimstart + kf_p_keyframe.start ||
+                currenttime > kf_p_keyframe.end ||
                 currenttime > duration
               ) {
                 object.set('visible', false);
@@ -1945,7 +2016,7 @@ async function animate(play, time) {
         }
       } else if (
         keyframe.t < time &&
-        !nextKeyframe(keyframe, index)
+        !nextKeyframe(keyframe, idx)
       ) {
         var prop = keyframe.name;
         if (prop == 'left' && !recording) {
@@ -2007,33 +2078,28 @@ async function animate(play, time) {
     objects.forEach(function (object) {
       if (object.id.indexOf('Group') == -1) {
         const object2 = canvas.getItemById(object.id);
-        if (
-          currenttime <
-          p_keyframes.find((x) => x.id == object.id).trimstart +
-            p_keyframes.find((x) => x.id == object.id).start
-        ) {
+        const p_keyframe = p_keyframes.find((x) => x.id == object.id);
+        if (!object2 || !p_keyframe) {
+          return;
+        }
+        if (currenttime < p_keyframe.trimstart + p_keyframe.start) {
           object2.set('visible', false);
         } else if (
-          currenttime >
-            p_keyframes.find((x) => x.id == object.id).end ||
+          currenttime > p_keyframe.end ||
           currenttime > duration
         ) {
           object2.set('visible', false);
         } else {
           object2.set('visible', true);
         }
-        if (
-          currenttime >=
-          p_keyframes.find((x) => x.id == object.id).trimstart +
-            p_keyframes.find((x) => x.id == object.id).start
-        ) {
+        if (currenttime >= p_keyframe.trimstart + p_keyframe.start) {
           props.forEach(function (prop) {
-            checkAnyKeyframe(object.id, prop, inst);
+            checkAnyKeyframe(object.id, prop, inst, idx);
           });
         }
       }
       var obj = canvas.getItemById(object.id);
-      if (obj.type == 'lottie') {
+      if (obj && obj.type == 'lottie') {
         obj.goToSeconds(currenttime);
         inst.renderAll();
       }
@@ -2073,16 +2139,19 @@ async function animate(play, time) {
             objects.forEach(function (object) {
               if (object.id.indexOf('Group') == -1) {
                 const object2 = inst.getItemById(object.id);
+                const p_keyframe = p_keyframes.find(
+                  (x) => x.id == object.id
+                );
+                if (!object2 || !p_keyframe) {
+                  return;
+                }
                 if (
                   currenttime <
-                  p_keyframes.find((x) => x.id == object.id)
-                    .trimstart +
-                    p_keyframes.find((x) => x.id == object.id).start
+                  p_keyframe.trimstart + p_keyframe.start
                 ) {
                   object2.set('visible', false);
                 } else if (
-                  currenttime >
-                    p_keyframes.find((x) => x.id == object.id).end ||
+                  currenttime > p_keyframe.end ||
                   currenttime > duration
                 ) {
                   object2.set('visible', false);
@@ -2091,17 +2160,15 @@ async function animate(play, time) {
                 }
                 if (
                   currenttime >=
-                  p_keyframes.find((x) => x.id == object.id)
-                    .trimstart +
-                    p_keyframes.find((x) => x.id == object.id).start
+                  p_keyframe.trimstart + p_keyframe.start
                 ) {
                   props.forEach(function (prop) {
-                    checkAnyKeyframe(object.id, prop, inst);
+                    checkAnyKeyframe(object.id, prop, inst, idx);
                   });
                 }
               }
               var obj = canvas.getItemById(object.id);
-              if (obj.type == 'lottie') {
+              if (obj && obj.type == 'lottie') {
                 obj.goToSeconds(currenttime);
                 inst.renderAll();
               }
@@ -2129,64 +2196,53 @@ async function animate(play, time) {
   }
 }
 
-// Render a keyframe
+// Keep group keyframes last so children animate before their group regroups
+function sortKeyframes() {
+  keyframes.sort(function (a, b) {
+    if (a.id.indexOf('Group') >= 0 && b.id.indexOf('Group') == -1) {
+      return 1;
+    } else if (
+      b.id.indexOf('Group') >= 0 &&
+      a.id.indexOf('Group') == -1
+    ) {
+      return -1;
+    } else {
+      return 0;
+    }
+  });
+}
+
+// Render a keyframe.
+// data-time is ALWAYS the absolute timeline time, because every lookup keys
+// off it. The CSS offset is relative, since the row it lives in is already
+// shifted by the layer start.
 function renderKeyframe(object, prop, time) {
-  const color = objects.find((x) => x.id == object.id).color;
-  if (prop == 'shadow.color') {
-    if (
-      $('#' + object.get('id'))
-        .find('.shadowcolor')
-        .is(':visible')
-    ) {
-      time =
-        time -
-        parseFloat(
-          p_keyframes.find((x) => x.id == object.get('id')).start
-        );
-    }
-    $('#' + object.get('id'))
-      .find('.shadowcolor')
-      .prepend(
-        "<div class='keyframe' data-time='" +
-          time +
-          "' data-object='" +
-          object.get('id') +
-          "' data-property='" +
-          prop +
-          "'></div>"
-      );
-    $('#' + object.get('id'))
-      .find('.shadowcolor')
-      .find("[data-time='" + time + "']")
-      .css({ left: time / timelinetime, background: color });
-  } else {
-    if (
-      $('#' + object.get('id'))
-        .find('.' + prop)
-        .is(':visible')
-    ) {
-      time =
-        time -
-        parseFloat(
-          p_keyframes.find((x) => x.id == object.get('id')).start
-        );
-    }
-    $('#' + object.get('id'))
-      .find('.' + prop)
-      .prepend(
-        "<div class='keyframe' data-time='" +
-          time +
-          "' data-object='" +
-          object.get('id') +
-          "' data-property='" +
-          prop +
-          "'></div>"
-      );
-    $('#' + object.get('id'))
-      .find('.' + prop)
-      .find("[data-time='" + time + "']")
-      .css({ left: time / timelinetime, background: color });
+  const entry = objects.find((x) => x.id == object.get('id'));
+  const p_keyframe = p_keyframes.find(
+    (x) => x.id == object.get('id')
+  );
+  if (!entry || !p_keyframe) {
+    return;
   }
+  const color = entry.color;
+  const rowclass = prop == 'shadow.color' ? 'shadowcolor' : prop;
+  const row = $('#' + object.get('id')).find('.' + rowclass);
+  if (row.length == 0) {
+    return;
+  }
+  const displaytime = time - parseFloat(p_keyframe.start);
+  row.prepend(
+    "<div class='keyframe' data-time='" +
+      time +
+      "' data-object='" +
+      object.get('id') +
+      "' data-property='" +
+      prop +
+      "'></div>"
+  );
+  row
+    .find("[data-time='" + time + "'][data-property='" + prop + "']")
+    .css({ left: displaytime / timelinetime, background: color });
 }
 
 // Create a keyframe
@@ -2210,19 +2266,19 @@ function newKeyframe(property, object, time, value, render) {
     });
     if (keyarr2.length == 0) {
       if (property == 'left') {
-        objects
-          .find((x) => x.id == object.get('id'))
-          .defaults.find((x) => x.name == property).value =
-          object.get(property) - artboard.get('left');
+        setDefaultValue(
+          object,
+          property,
+          object.get(property) - artboard.get('left')
+        );
       } else if (property == 'top') {
-        objects
-          .find((x) => x.id == object.get('id'))
-          .defaults.find((x) => x.name == property).value =
-          object.get(property) - artboard.get('top');
+        setDefaultValue(
+          object,
+          property,
+          object.get(property) - artboard.get('top')
+        );
       } else {
-        objects
-          .find((x) => x.id == object.get('id'))
-          .defaults.find((x) => x.name == property).value = value;
+        setDefaultValue(object, property, value);
       }
     }
     if (keyarr.length == 0) {
@@ -2266,21 +2322,7 @@ function newKeyframe(property, object, time, value, render) {
       ) {
         renderKeyframe(object, property, time);
       }
-      keyframes.sort(function (a, b) {
-        if (
-          a.id.indexOf('Group') >= 0 &&
-          b.id.indexOf('Group') == -1
-        ) {
-          return 1;
-        } else if (
-          b.id.indexOf('Group') >= 0 &&
-          a.id.indexOf('Group') == -1
-        ) {
-          return -1;
-        } else {
-          return 0;
-        }
-      });
+      sortKeyframes();
     } else if (render) {
       if (
         property != 'top' &&
@@ -2308,19 +2350,19 @@ function newKeyframe(property, object, time, value, render) {
     }
   } else {
     if (property == 'left') {
-      objects
-        .find((x) => x.id == object.get('id'))
-        .defaults.find((x) => x.name == property).value =
-        object.get(property) - artboard.get('left');
+      setDefaultValue(
+        object,
+        property,
+        object.get(property) - artboard.get('left')
+      );
     } else if (property == 'top') {
-      objects
-        .find((x) => x.id == object.get('id'))
-        .defaults.find((x) => x.name == property).value =
-        object.get(property) - artboard.get('top');
+      setDefaultValue(
+        object,
+        property,
+        object.get(property) - artboard.get('top')
+      );
     } else {
-      objects
-        .find((x) => x.id == object.get('id'))
-        .defaults.find((x) => x.name == property).value = value;
+      setDefaultValue(object, property, value);
     }
   }
 }
@@ -2368,32 +2410,33 @@ function manualKeyframe() {
     );
   } else if (prop == 'shadow') {
     prop = 'shadow.color';
+    // fabric's get() is not a path getter - read the shadow object directly
     newKeyframe(
       'shadow.opacity',
       object,
       currenttime,
-      object.get('shadow.opacity'),
+      object.shadow.opacity,
       true
     );
     newKeyframe(
       'shadow.offsetX',
       object,
       currenttime,
-      object.get('shadow.offsetX'),
+      object.shadow.offsetX,
       true
     );
     newKeyframe(
       'shadow.offsetY',
       object,
       currenttime,
-      object.get('shadow.offsetY'),
+      object.shadow.offsetY,
       true
     );
     newKeyframe(
       'shadow.blur',
       object,
       currenttime,
-      object.get('shadow.blur'),
+      object.shadow.blur,
       true
     );
   } else if (prop == 'text') {
@@ -2406,7 +2449,7 @@ function manualKeyframe() {
       true
     );
   }
-  newKeyframe(prop, object, currenttime, object.get(prop), true);
+  newKeyframe(prop, object, currenttime, getPropValue(object, prop), true);
   save();
 }
 $(document).on('click', '.property-keyframe', manualKeyframe);
@@ -2526,14 +2569,8 @@ function animateProp(prop, object) {
       true
     );
     newKeyframe('top', object, currenttime, object.get('top'), true);
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'left').value =
-      object.get('left') - artboard.get('left');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'top').value =
-      object.get('top') - artboard.get('top');
+    setDefaultValue(object, 'left', object.get('left') - artboard.get('left'));
+    setDefaultValue(object, 'top', object.get('top') - artboard.get('top'));
   } else if (prop == 'scaleX') {
     newKeyframe(
       'scaleY',
@@ -2565,18 +2602,9 @@ function animateProp(prop, object) {
     objects
       .find((x) => x.id == object.get('id'))
       .animate.push('height');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'height').value =
-      object.get('height');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'width').value =
-      object.get('width');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'scaleY').value =
-      object.get('scaleY');
+    setDefaultValue(object, 'height', object.get('height'));
+    setDefaultValue(object, 'width', object.get('width'));
+    setDefaultValue(object, 'scaleY', object.get('scaleY'));
   } else if (prop == 'strokeWidth') {
     newKeyframe(
       'stroke',
@@ -2585,10 +2613,7 @@ function animateProp(prop, object) {
       object.get('stroke'),
       true
     );
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'stroke').value =
-      object.get('stroke');
+    setDefaultValue(object, 'stroke', object.get('stroke'));
     objects
       .find((x) => x.id == object.get('id'))
       .animate.push('stroke');
@@ -2628,26 +2653,11 @@ function animateProp(prop, object) {
       object.shadow.blur,
       true
     );
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.color').value =
-      object.get('shadow.color');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.opacity').value =
-      object.get('shadow.opacity');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.offsetX').value =
-      object.get('shadow.offsetX');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.offsetY').value =
-      object.get('shadow.offsetY');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.blur').value =
-      object.get('shadow.blur');
+    setDefaultValue(object, 'shadow.color', object.shadow.color);
+    setDefaultValue(object, 'shadow.opacity', object.shadow.opacity);
+    setDefaultValue(object, 'shadow.offsetX', object.shadow.offsetX);
+    setDefaultValue(object, 'shadow.offsetY', object.shadow.offsetY);
+    setDefaultValue(object, 'shadow.blur', object.shadow.blur);
     objects
       .find((x) => x.id == object.get('id'))
       .animate.push('shadow.opacity');
@@ -2668,10 +2678,7 @@ function animateProp(prop, object) {
       object.get('lineHeight'),
       true
     );
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'lineHeight').value =
-      object.get('lineHeight');
+    setDefaultValue(object, 'lineHeight', object.get('lineHeight'));
     objects
       .find((x) => x.id == object.get('id'))
       .animate.push('lineHeight');
@@ -2680,9 +2687,7 @@ function animateProp(prop, object) {
   // Exception
   if (prop != 'left' && prop != 'shadow.color') {
     newKeyframe(prop, object, currenttime, object.get(prop), true);
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == prop).value = object.get(prop);
+    setDefaultValue(object, prop, object.get(prop));
   }
 }
 
@@ -2704,27 +2709,12 @@ function freezeProp(prop, object) {
     keyframes = $.grep(keyframes, function (e) {
       return e.id != object.get('id') || e.name != 'top';
     });
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'left').value =
-      object.get('left') - artboard.get('left');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'top').value =
-      object.get('top') - artboard.get('top');
+    setDefaultValue(object, 'left', object.get('left') - artboard.get('left'));
+    setDefaultValue(object, 'top', object.get('top') - artboard.get('top'));
   } else if (prop == 'scaleX') {
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'height').value =
-      object.get('height');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'width').value =
-      object.get('width');
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'scaleY').value =
-      object.get('scaleY');
+    setDefaultValue(object, 'height', object.get('height'));
+    setDefaultValue(object, 'width', object.get('width'));
+    setDefaultValue(object, 'scaleY', object.get('scaleY'));
     objects.find((x) => x.id == object.get('id')).animate = $.grep(
       objects.find((x) => x.id == object.get('id')).animate,
       function (e) {
@@ -2753,10 +2743,7 @@ function freezeProp(prop, object) {
       return e.id != object.get('id') || e.name != 'height';
     });
   } else if (prop == 'strokeWidth') {
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'stroke').value =
-      object.get('stroke');
+    setDefaultValue(object, 'stroke', object.get('stroke'));
     objects.find((x) => x.id == object.get('id')).animate = $.grep(
       objects.find((x) => x.id == object.get('id')).animate,
       function (e) {
@@ -2767,22 +2754,10 @@ function freezeProp(prop, object) {
       return e.id != object.get('id') || e.name != 'stroke';
     });
   } else if (prop == 'shadow.color') {
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.opacity').value =
-      object.shadow.opacity;
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.offsetX').value =
-      object.shadow.offsetX;
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.offsetY').value =
-      object.shadow.offsetY;
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'shadow.blur').value =
-      object.shadow.blur;
+    setDefaultValue(object, 'shadow.opacity', object.shadow.opacity);
+    setDefaultValue(object, 'shadow.offsetX', object.shadow.offsetX);
+    setDefaultValue(object, 'shadow.offsetY', object.shadow.offsetY);
+    setDefaultValue(object, 'shadow.blur', object.shadow.blur);
     keyframes = $.grep(keyframes, function (e) {
       return e.id != object.get('id') || e.name != 'shadow.opacity';
     });
@@ -2820,10 +2795,7 @@ function freezeProp(prop, object) {
       }
     );
   } else if (prop == 'charSpacing') {
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == 'lineHeight').value =
-      object.get('lineHeight');
+    setDefaultValue(object, 'lineHeight', object.get('lineHeight'));
     objects.find((x) => x.id == object.get('id')).animate = $.grep(
       objects.find((x) => x.id == object.get('id')).animate,
       function (e) {
@@ -2841,9 +2813,7 @@ function freezeProp(prop, object) {
 
   // Exception
   if (prop != 'left' && prop != 'shadow.color') {
-    objects
-      .find((x) => x.id == object.get('id'))
-      .defaults.find((x) => x.name == prop).value = object.get(prop);
+    setDefaultValue(object, prop, object.get(prop));
   }
 
   $(
@@ -2944,7 +2914,11 @@ function lockLayer(e) {
     $(this).removeClass('locked');
     $(this).attr('src', 'assets/lock.svg');
     object.selectable = true;
-    $(this).parent().parent().parent().attr('draggable', true);
+    $(this)
+      .parent()
+      .parent()
+      .find('.layer-handle')
+      .attr('draggable', true);
   } else {
     $(this).addClass('locked');
     $(this).attr('src', 'assets/locked.svg');
@@ -2953,7 +2927,11 @@ function lockLayer(e) {
       canvas.discardActiveObject();
       canvas.renderAll();
     }
-    $(this).parent().parent().parent().attr('draggable', false);
+    $(this)
+      .parent()
+      .parent()
+      .find('.layer-handle')
+      .attr('draggable', false);
   }
   save();
 }
@@ -2972,8 +2950,15 @@ function centerObject(object) {
 
 // Render a layer
 function renderLayer(object, animate = false) {
+  const entry = objects.find((x) => x.id == object.get('id'));
+  const p_keyframe = p_keyframes.find(
+    (x) => x.id == object.get('id')
+  );
+  if (!entry || !p_keyframe) {
+    return;
+  }
   $('#nolayers').addClass('yaylayers');
-  const color = objects.find((x) => x.id == object.get('id')).color;
+  const color = entry.color;
   var src = '';
   var classlock = '';
   var srclock = 'lock';
@@ -3014,20 +2999,14 @@ function renderLayer(object, animate = false) {
   if (animate != false) {
     freeze = 'frozen';
   }
-  const leftoffset =
-    p_keyframes.find((x) => x.id == object.get('id')).trimstart /
-    timelinetime;
+  const leftoffset = p_keyframe.trimstart / timelinetime;
   const width =
-    (p_keyframes.find((x) => x.id == object.get('id')).end -
-      p_keyframes.find((x) => x.id == object.get('id')).trimstart) /
-    timelinetime;
+    (p_keyframe.end - p_keyframe.trimstart) / timelinetime;
   $('#inner-timeline').prepend(
     "<div class='object-props' id='" +
       object.get('id') +
       "' style='width:" +
-      (p_keyframes.find((x) => x.id == object.get('id')).end -
-        p_keyframes.find((x) => x.id == object.get('id')).start) /
-        timelinetime +
+      (p_keyframe.end - p_keyframe.start) / timelinetime +
       "px'><div class='row main-row'><div class='row-el' style='background-color:" +
       color +
       "'><div class='trim-row' style='left:" +
@@ -3046,10 +3025,10 @@ function renderLayer(object, animate = false) {
     $('#layer-inner-list').prepend(
       "<div class='layer' data-object='" +
         object.get('id') +
-        "'><div class='layer-name'><img class='droparrow' src='assets/drop-arrow.svg' ><img class='layer-icon' src=" +
+        "'><div class='layer-name'><div class='layer-handle' title='Drag to reorder'></div><img class='droparrow' src='assets/drop-arrow.svg' ><img class='layer-icon' src=" +
         src +
         "><input class='layer-custom-name' value='" +
-        objects.find((x) => x.id == object.get('id')).label +
+        entry.label +
         "' readonly></span><div class='layer-options'><img class='" +
         freeze +
         "' src='assets/" +
@@ -3060,10 +3039,10 @@ function renderLayer(object, animate = false) {
     $('#layer-inner-list').prepend(
       "<div class='layer' data-object='" +
         object.get('id') +
-        "'><div class='layer-name'><img class='droparrow' src='assets/drop-arrow.svg' ><img class='layer-icon' src=" +
+        "'><div class='layer-name'><div class='layer-handle' title='Drag to reorder'></div><img class='droparrow' src='assets/drop-arrow.svg' ><img class='layer-icon' src=" +
         src +
         "><input class='layer-custom-name' value='" +
-        objects.find((x) => x.id == object.get('id')).label +
+        entry.label +
         "' readonly></span><div class='layer-options'><img class='lock " +
         classlock +
         "' src='assets/" +
@@ -3079,35 +3058,27 @@ function renderLayer(object, animate = false) {
     .find('.properties')
     .toggle();
   setTimelineZoom(timelinetime);
-  sortable('#layer-inner-list', {
-    placeholderClass: 'hovering',
-    copy: true,
-    customDragImage: (draggedElement, elementOffset, event) => {
-      return {
-        element: document.getElementById('nothing'),
-        posX: event.pageX - elementOffset.left,
-        posY: event.pageY - elementOffset.top,
-      };
-    },
-  });
+  // Make the new layer draggable (html5sortable only wires up the
+  // children that exist when it is initialized)
+  if (typeof initLayerSortable == 'function') {
+    initLayerSortable();
+  }
   if (object.selectable == false) {
-    $(".layer[data-object='" + object.get('id') + "']").attr(
-      'draggable',
-      false
-    );
+    $(".layer[data-object='" + object.get('id') + "']")
+      .find('.layer-handle')
+      .attr('draggable', false);
   }
 }
 
 // Render a property
 function renderProp(prop, object) {
   var classfreeze = '';
-  srcfreeze = 'freeze';
-  if (
-    $.inArray(
-      prop,
-      objects.find((x) => x.id == object.get('id')).animate
-    ) != -1
-  ) {
+  var srcfreeze = 'freeze';
+  const entry = objects.find((x) => x.id == object.get('id'));
+  if (!entry) {
+    return;
+  }
+  if ($.inArray(prop, entry.animate) != -1) {
     classfreeze = 'frozen';
     srcfreeze = 'frozen';
   }
@@ -3218,6 +3189,10 @@ function newLayer(object) {
     } else if (object.get('assetType') == 'audio') {
       color = '#11C0F7';
     }
+  } else if (object.get('type') == 'lottie') {
+    color = '#F1890E';
+  } else {
+    color = '#9211F7';
   }
   if (
     (object.get('assetType') && object.get('assetType') == 'video') ||
@@ -3235,25 +3210,20 @@ function newLayer(object) {
       start: 0,
       end: object.get('duration'),
     });
-    if (object.get('duration') < duration) {
-      p_keyframes.push({
-        start: currenttime,
-        end: object.get('duration') + currenttime,
-        trimstart: 0,
-        trimend: object.get('duration') + currenttime,
-        object: object,
-        id: object.get('id'),
-      });
-    } else {
-      p_keyframes.push({
-        start: currenttime,
-        end: duration - currenttime,
-        trimstart: 0,
-        trimend: duration - currenttime,
-        object: object,
-        id: object.get('id'),
-      });
-    }
+    // Clamp to the project end. This used to be `duration - currenttime`,
+    // which shortened every layer added after t=0.
+    const mediaend = Math.min(
+      object.get('duration') + currenttime,
+      duration
+    );
+    p_keyframes.push({
+      start: currenttime,
+      end: mediaend,
+      trimstart: 0,
+      trimend: mediaend,
+      object: object,
+      id: object.get('id'),
+    });
   } else {
     objects.push({
       object: object,
@@ -3264,25 +3234,16 @@ function newLayer(object) {
       locked: [],
       mask: 'none',
     });
-    if (object.get('notnew')) {
-      p_keyframes.push({
-        start: object.get('starttime'),
-        end: duration - object.get('starttime'),
-        trimstart: 0,
-        trimend: duration - currenttime,
-        object: object,
-        id: object.get('id'),
-      });
-    } else {
-      p_keyframes.push({
-        start: currenttime,
-        end: duration - currenttime,
-        trimstart: 0,
-        trimend: duration - currenttime,
-        object: object,
-        id: object.get('id'),
-      });
-    }
+    p_keyframes.push({
+      start: object.get('notnew')
+        ? object.get('starttime')
+        : currenttime,
+      end: duration,
+      trimstart: 0,
+      trimend: duration,
+      object: object,
+      id: object.get('id'),
+    });
   }
   renderLayer(object);
   if (
@@ -3370,9 +3331,11 @@ function newLayer(object) {
   $(".layer[data-object='" + object.get('id') + "']").addClass(
     'layer-selected'
   );
-  document
-    .getElementsByClassName('layer-selected')[0]
-    .scrollIntoView();
+  const selectedLayer =
+    document.getElementsByClassName('layer-selected')[0];
+  if (selectedLayer) {
+    selectedLayer.scrollIntoView();
+  }
   objects.find((x) => x.id == object.id).animate = [];
   animate(false, currenttime);
   save();
@@ -3502,6 +3465,10 @@ function loadVideo(src, x, y, center) {
   vidSrc.src = src;
   vidObj.crossOrigin = 'anonymous';
   vidObj.appendChild(vidSrc);
+  vidObj.addEventListener('error', function () {
+    console.error('Could not load video', src);
+    $('#load-video').removeClass('loading-active');
+  });
   vidObj.addEventListener('loadeddata', function () {
     vidObj.width = this.videoWidth;
     vidObj.height = this.videoHeight;
@@ -3547,17 +3514,20 @@ function checkCrop(obj) {
 
 // Perform a crop
 function crop(obj) {
-  var crop = canvas.getItemById('crop');
+  var cropUI = canvas.getItemById('crop');
+  if (!obj || !cropUI || !cropobj) {
+    return;
+  }
   cropobj.setCoords();
-  crop.setCoords();
+  cropUI.setCoords();
   var cleft =
-    crop.get('left') - (crop.get('width') * crop.get('scaleX')) / 2;
+    cropUI.get('left') - (cropUI.get('width') * cropUI.get('scaleX')) / 2;
   var ctop =
-    crop.get('top') - (crop.get('height') * crop.get('scaleY')) / 2;
+    cropUI.get('top') - (cropUI.get('height') * cropUI.get('scaleY')) / 2;
   var height =
-    (crop.get('height') / cropobj.get('scaleY')) * crop.get('scaleY');
+    (cropUI.get('height') / cropobj.get('scaleY')) * cropUI.get('scaleY');
   var width =
-    (crop.get('width') / cropobj.get('scaleX')) * crop.get('scaleX');
+    (cropUI.get('width') / cropobj.get('scaleX')) * cropUI.get('scaleX');
   var img_height = cropobj.get('height') * cropobj.get('scaleY');
   var img_width = cropobj.get('width') * cropobj.get('scaleX');
   var left =
@@ -3603,8 +3573,8 @@ function crop(obj) {
     canvas.renderAll();
   }
   if (obj.get('id') != 'cropped') {
-    canvas.remove(crop);
-    canvas.remove(canvas.getItemById('overlay'));
+    canvas.remove(cropUI);
+    canvas.remove(canvas.getItemById('crop-overlay'));
     canvas.remove(canvas.getItemById('cropped'));
     cropping = false;
     resetControls();
@@ -3613,7 +3583,7 @@ function crop(obj) {
     newKeyframe('scaleX', obj, currenttime, obj.get('scaleX'), true);
     newKeyframe('scaleY', obj, currenttime, obj.get('scaleY'), true);
     newKeyframe('width', obj, currenttime, obj.get('width'), true);
-    newKeyframe('height', obj, currenttime, obj.get('width'), true);
+    newKeyframe('height', obj, currenttime, obj.get('height'), true);
     newKeyframe('left', obj, currenttime, obj.get('left'), true);
     newKeyframe('top', obj, currenttime, obj.get('top'), true);
     $('#properties-overlay').removeClass('properties-disabled');
@@ -3642,7 +3612,8 @@ function overlay() {
       height: artboard.height,
       fill: 'rgba(0,0,0,0.5)',
       selectable: false,
-      id: 'overlay',
+      // Not "overlay": that is the artboard's id
+      id: 'crop-overlay',
     })
   );
 }
@@ -3863,6 +3834,10 @@ function loadImage(src, x, y, width, center) {
   image.onload = function (img) {
     newImage(image, x, y, width, center);
   };
+  image.onerror = function () {
+    console.error('Could not load image', src);
+    $('#load-image').removeClass('loading-active');
+  };
   image.src = src;
 }
 
@@ -3890,19 +3865,15 @@ function createVideoThumbnail(file, max, seekTo = 0.0, isURL) {
       videoPlayer.addEventListener('seeked', () => {
         var oc = document.createElement('canvas');
         var octx = oc.getContext('2d');
-        oc.width = videoPlayer.videoWidth;
-        oc.height = videoPlayer.videoheight;
-        octx.drawImage(videoPlayer, 0, 0);
         if (videoPlayer.videoWidth > videoPlayer.videoHeight) {
+          oc.width = max;
           oc.height =
             (videoPlayer.videoHeight / videoPlayer.videoWidth) * max;
-          oc.width = max;
         } else {
+          oc.height = max;
           oc.width =
             (videoPlayer.videoWidth / videoPlayer.videoHeight) * max;
-          oc.height = max;
         }
-        octx.drawImage(oc, 0, 0, oc.width, oc.height);
         octx.drawImage(videoPlayer, 0, 0, oc.width, oc.height);
         resolve(oc.toDataURL());
       });
@@ -3919,17 +3890,13 @@ function createThumbnail(file, max) {
         if (img.width > max) {
           var oc = document.createElement('canvas');
           var octx = oc.getContext('2d');
-          oc.width = img.width;
-          oc.height = img.height;
-          octx.drawImage(img, 0, 0);
           if (img.width > img.height) {
-            oc.height = (img.height / img.width) * max;
             oc.width = max;
+            oc.height = (img.height / img.width) * max;
           } else {
-            oc.width = (img.width / img.height) * max;
             oc.height = max;
+            oc.width = (img.width / img.height) * max;
           }
-          octx.drawImage(oc, 0, 0, oc.width, oc.height);
           octx.drawImage(img, 0, 0, oc.width, oc.height);
           resolve(oc.toDataURL());
         } else {
@@ -4291,34 +4258,35 @@ $(document).on('click', '.align-text', alignText);
 // Change font
 function changeFont() {
   var font = $('#font-picker').val();
-  if (canvas.getActiveObject().get('assetType')) {
+  const active = canvas.getActiveObject();
+  if (!active || !font) {
+    return;
+  }
+  if (active.get('assetType')) {
     WebFont.load({
       google: {
         families: [font],
       },
       active: () => {
-        var object = canvas.getActiveObject();
-        animatedtext
-          .find((x) => x.id == object.id)
-          .reset(
-            animatedtext.find((x) => x.id == object.id).text,
-            $.extend(
-              animatedtext.find((x) => x.id == object.id).props,
-              { fontFamily: font }
-            ),
-            canvas
-          );
+        const text = animatedtext.find((x) => x.id == active.id);
+        if (!text) {
+          return;
+        }
+        text.reset(
+          text.text,
+          $.extend(text.props, { fontFamily: font }),
+          canvas
+        );
         save();
       },
     });
-    save();
   } else {
     WebFont.load({
       google: {
         families: [font],
       },
       active: () => {
-        canvas.getActiveObject().set('fontFamily', font);
+        active.set('fontFamily', font);
         canvas.renderAll();
         save();
       },
@@ -4396,7 +4364,7 @@ function newTextbox(
     strokeDashArray: false,
     width: calculateTextWidth(
       text,
-      fontweight + ' ' + fontsize + 'px Inter'
+      fontweight + ' ' + fontsize + 'px ' + (font || 'Inter')
     ),
     id: 'Text' + layer_count,
     shadow: {
@@ -4440,10 +4408,21 @@ function deleteObject(object, def = true) {
     });
   }
   if (object.type == 'image') {
-    var temp = files.find((x) => x.name == object.get('id'));
     files = $.grep(files, function (a) {
-      return a != temp.name;
+      return a.name != object.get('id');
     });
+  }
+  // Release any media element the object was holding on to
+  if (typeof object.getElement === 'function') {
+    const el = object.getElement();
+    if (el && el.tagName == 'VIDEO') {
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    }
+  }
+  if (object.get('src') && typeof object.get('src').pause === 'function') {
+    object.get('src').pause();
   }
   $(".layer[data-object='" + object.get('id') + "']").remove();
   $('#' + object.get('id')).remove();
@@ -4519,29 +4498,25 @@ function setDuration(length) {
       ('0' + Math.floor((seconds % 1) * 100)).slice(-2)
   );
   $('.object-props').each(function () {
+    const p_keyframe = p_keyframes.find(
+      (x) => x.id == $(this).attr('id')
+    );
+    if (!p_keyframe) {
+      return;
+    }
     $(this).css(
       'width',
-      duration / timelinetime -
-        p_keyframes.find((x) => x.id == $(this).attr('id')).start /
-          timelinetime +
-        'px'
+      duration / timelinetime - p_keyframe.start / timelinetime + 'px'
     );
-    p_keyframes.find((x) => x.id == $(this).attr('id')).end =
-      duration;
-    if (
-      p_keyframes.find((x) => x.id == $(this).attr('id')).trimend >
-      p_keyframes.find((x) => x.id == $(this).attr('id')).end
-    ) {
-      p_keyframes.find((x) => x.id == $(this).attr('id')).trimend =
-        duration;
+    p_keyframe.end = duration;
+    if (p_keyframe.trimend > p_keyframe.end) {
+      p_keyframe.trimend = duration;
       $(this)
         .find('.trim-row')
         .css(
           'width',
           duration / timelinetime -
-            p_keyframes.find((x) => x.id == $(this).attr('id'))
-              .trimstart /
-              timelinetime +
+            p_keyframe.trimstart / timelinetime +
             'px'
         );
     }
@@ -4578,7 +4553,7 @@ function renderTimeMarkers() {
         's<span></span></div>'
     );
     if (timenumber % modulo != 0) {
-      $('.time-number:last-child()').css('opacity', '0');
+      $('#time-numbers .time-number:last-child').css('opacity', '0');
     }
     timenumber++;
   }
@@ -4587,21 +4562,22 @@ function renderTimeMarkers() {
 // Change timeline zoom level
 function setTimelineZoom(time) {
   $('.object-props').each(function () {
+    const p_keyframe = p_keyframes.find(
+      (x) => x.id == $(this).attr('id')
+    );
+    if (!p_keyframe) {
+      return;
+    }
     $(this).offset({
       left:
-        p_keyframes.find((x) => x.id == $(this).attr('id')).start /
-          time +
+        p_keyframe.start / time +
         $('#inner-timeline').offset().left +
         offset_left,
     });
     $(this).css({ width: ($(this).width() * timelinetime) / time });
     $(this)
       .find('.trim-row')
-      .css({
-        left:
-          p_keyframes.find((x) => x.id == $(this).attr('id'))
-            .trimstart / time,
-      });
+      .css({ left: p_keyframe.trimstart / time });
     $(this)
       .find('.trim-row')
       .css({
@@ -4635,95 +4611,18 @@ $(document).on('input', '#timeline-zoom', function () {
 });
 
 function removeKeyframe() {
+  if (!selectedkeyframe) {
+    return;
+  }
+  const time = selectedkeyframe.attr('data-time');
+  const id = selectedkeyframe.attr('data-object');
+  const prop = selectedkeyframe.attr('data-property');
+  const names = [prop].concat(KEYFRAME_COUNTERPARTS[prop] || []);
   keyframes = $.grep(keyframes, function (e) {
     return (
-      e.t != selectedkeyframe.attr('data-time') ||
-      e.id != selectedkeyframe.attr('data-object') ||
-      e.name != selectedkeyframe.attr('data-property')
+      e.t != time || e.id != id || names.indexOf(e.name) == -1
     );
   });
-  if (selectedkeyframe.attr('data-property') == 'left') {
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'top'
-      );
-    });
-  } else if (selectedkeyframe.attr('data-property') == 'scaleX') {
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'scaleY'
-      );
-    });
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'width'
-      );
-    });
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'height'
-      );
-    });
-  } else if (
-    selectedkeyframe.attr('data-property') == 'strokeWidth'
-  ) {
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'stroke'
-      );
-    });
-  } else if (
-    selectedkeyframe.attr('data-property') == 'shadow.color'
-  ) {
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'shadow.blur'
-      );
-    });
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'shadow.offsetX'
-      );
-    });
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'shadow.offsetY'
-      );
-    });
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'shadow.opacity'
-      );
-    });
-  } else if (
-    selectedkeyframe.attr('data-property') == 'charSpacing'
-  ) {
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != selectedkeyframe.attr('data-time') ||
-        e.id != selectedkeyframe.attr('data-object') ||
-        e.name != 'lineHeight'
-      );
-    });
-  }
   selectedkeyframe.remove();
   $('#keyframe-properties').removeClass('show-properties');
 }
@@ -4744,437 +4643,126 @@ function deleteKeyframe() {
 }
 $(document).on('click', '#delete-keyframe', deleteKeyframe);
 
+// Properties that are always keyframed together with a leading property
+const KEYFRAME_COUNTERPARTS = {
+  left: ['top'],
+  scaleX: ['scaleY', 'width', 'height'],
+  strokeWidth: ['stroke'],
+  'shadow.color': [
+    'shadow.opacity',
+    'shadow.offsetX',
+    'shadow.offsetY',
+    'shadow.blur',
+  ],
+  charSpacing: ['lineHeight'],
+};
+
 // Copy keyframes
 function copyKeyframes() {
+  if (!Array.isArray(clipboard) || clipboard.length == 0) {
+    return;
+  }
   clipboard.sort(function (a, b) {
     return a.t - b.t;
   });
   var inittime = clipboard[0].t;
   clipboard.forEach(function (keyframe) {
+    const object = canvas.getItemById(keyframe.id);
+    if (!object) {
+      return;
+    }
     var newtime = keyframe.t - inittime + currenttime;
     newKeyframe(
       keyframe.name,
-      canvas.getItemById(keyframe.id),
+      object,
       newtime,
       keyframe.value,
       true
     );
-    var keyprop = keyframe.name;
-    if (keyprop == 'left') {
+    // Counterpart properties are stored as separate keyframes at the same
+    // time; copy whichever of them actually exist.
+    const counterparts = KEYFRAME_COUNTERPARTS[keyframe.name] || [];
+    counterparts.forEach(function (name) {
       const keyarr2 = $.grep(keyframes, function (e) {
         return (
-          e.t == keyframe.t && e.id == keyframe.id && e.name == 'top'
-        );
-      });
-      newKeyframe(
-        'top',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-    } else if (keyprop == 'scaleX') {
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
           e.t == keyframe.t &&
           e.id == keyframe.id &&
-          e.name == 'scaleY'
-        );
-      });
-      newKeyframe(
-        'scaleY',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'width'
+          e.name == name
         );
       });
       if (keyarr2.length > 0) {
-        newKeyframe(
-          'width',
-          canvas.getItemById(keyframe.id),
-          newtime,
-          keyarr2[0].value,
-          true
-        );
+        newKeyframe(name, object, newtime, keyarr2[0].value, true);
       }
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'height'
-        );
-      });
-      if (keyarr2.length > 0) {
-        newKeyframe(
-          'height',
-          canvas.getItemById(keyframe.id),
-          newtime,
-          keyarr2[0].value,
-          true
-        );
-      }
-    } else if (keyprop == 'strokeWidth') {
-      const keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'stroke'
-        );
-      });
-      newKeyframe(
-        'stroke',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-    } else if (keyprop == 'charSpacing') {
-      const keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'lineHeight'
-        );
-      });
-      newKeyframe(
-        'lineHeight',
-        canvas.getItemByid(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-    } else if (keyprop == 'shadow.color') {
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'shadow.opacity'
-        );
-      });
-      newKeyframe(
-        'shadow.opacity',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'shadow.offsetX'
-        );
-      });
-      newKeyframe(
-        'shadow.offsetX',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'shadow.offsetY'
-        );
-      });
-
-      newKeyframe(
-        'shadow.offsetY',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-      var keyarr2 = $.grep(keyframes, function (e) {
-        return (
-          e.t == keyframe.t &&
-          e.id == keyframe.id &&
-          e.name == 'shadow.blur'
-        );
-      });
-      newKeyframe(
-        'shadow.blur',
-        canvas.getItemById(keyframe.id),
-        newtime,
-        keyarr2[0].value,
-        true
-      );
-    }
-    save();
+    });
   });
+  save();
 }
 
-// Update keyframe (after dragging)
-function updateKeyframe(drag, newval, offset) {
-  var time = parseFloat(
-    (drag.position().left * timelinetime).toFixed(1)
-  );
+// Update keyframe (after dragging, or when re-stamping it at the playhead)
+function updateKeyframe(drag, newval) {
   const keyprop = drag.attr('data-property');
   const keytime = drag.attr('data-time');
+  const objectid = drag.attr('data-object');
   const keyarr = $.grep(keyframes, function (e) {
     return (
       e.t == parseFloat(keytime) &&
-      e.id == drag.attr('data-object') &&
+      e.id == objectid &&
       e.name == keyprop
     );
   });
+  if (keyarr.length == 0) {
+    return;
+  }
   const keyobj = canvas.getItemById(keyarr[0].id);
-  time =
-    parseFloat(
-      p_keyframes.find((x) => x.id == keyobj.get('id')).start
-    ) + time;
-  if (newval) {
-    time = currenttime;
+  const p_keyframe = p_keyframes.find((x) => x.id == objectid);
+  if (!keyobj || !p_keyframe) {
+    return;
   }
-  var keyval = keyarr[0].value;
-  if (newval) {
-    if (keyprop == 'shadow.color') {
-      keyval = keyobj.shadow.color;
-    } else if (keyprop == 'volume') {
-      keyval = parseFloat($('#object-volume input').val() / 200);
-    } else {
-      keyval = keyobj.get(keyprop);
-    }
-  } else if (keyprop == 'left') {
-    keyval = keyval + artboard.get('left');
-  }
-  keyframes = $.grep(keyframes, function (e) {
-    return (
-      e.t != parseFloat(keytime) ||
-      e.id != drag.attr('data-object') ||
-      e.name != keyprop
-    );
-  });
-  newKeyframe(keyprop, keyobj, time, keyval, false);
-  if (keyprop == 'left') {
-    const keyarr2 = $.grep(keyframes, function (e) {
+  // data-time is always absolute; drag.position() is relative to the layer
+  // row, which is itself offset by the layer start.
+  const time = newval
+    ? currenttime
+    : parseFloat(p_keyframe.start) +
+      parseFloat((drag.position().left * timelinetime).toFixed(1));
+
+  const names = [keyprop].concat(
+    KEYFRAME_COUNTERPARTS[keyprop] || []
+  );
+  names.forEach(function (name) {
+    const arr = $.grep(keyframes, function (e) {
       return (
         e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'top'
+        e.id == objectid &&
+        e.name == name
       );
     });
-    var keyval2 = keyarr2[0].value + artboard.get('top');
+    if (arr.length == 0) {
+      return;
+    }
+    let value = arr[0].value;
     if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).get('top');
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'top'
-      );
-    });
-    newKeyframe('top', keyobj, time, keyval2, false);
-  } else if (keyprop == 'scaleX') {
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'scaleY'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).get('scaleY');
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'scaleY'
-      );
-    });
-    newKeyframe('scaleY', keyobj, time, keyval2, false);
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'width'
-      );
-    });
-    if (keyarr2.length > 0) {
-      var keyval2 = keyarr2[0].value;
-      if (newval) {
-        keyval2 = canvas.getItemById(keyarr2[0].id).get('width');
+      if (name == 'volume') {
+        value = parseFloat($('#object-volume input').val()) / 200;
+      } else {
+        value = getPropValue(keyobj, name);
       }
-      keyframes = $.grep(keyframes, function (e) {
-        return (
-          e.t != parseFloat(keytime) ||
-          e.id != drag.attr('data-object') ||
-          e.name != 'width'
-        );
-      });
-      newKeyframe('width', keyobj, time, keyval2, false);
-    }
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'height'
-      );
-    });
-    if (keyarr2.length > 0) {
-      var keyval2 = keyarr2[0].value;
-      if (newval) {
-        keyval2 = canvas.getItemById(keyarr2[0].id).get('height');
-      }
-      keyframes = $.grep(keyframes, function (e) {
-        return (
-          e.t != parseFloat(keytime) ||
-          e.id != drag.attr('data-object') ||
-          e.name != 'height'
-        );
-      });
-      newKeyframe('height', keyobj, time, keyval2, false);
-    }
-  } else if (keyprop == 'strokeWidth') {
-    const keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'stroke'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).get('stroke');
+    } else if (name == 'left') {
+      // newKeyframe stores left/top relative to the artboard
+      value = value + artboard.get('left');
+    } else if (name == 'top') {
+      value = value + artboard.get('top');
     }
     keyframes = $.grep(keyframes, function (e) {
       return (
         e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'stroke'
+        e.id != objectid ||
+        e.name != name
       );
     });
-    newKeyframe('stroke', keyobj, time, keyval2, false);
-  } else if (keyprop == 'charSpacing') {
-    const keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'lineHeight'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).get('lineHeight');
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'lineHeight'
-      );
-    });
-    newKeyframe('lineHeight', keyobj, time, keyval2, false);
-  } else if (keyprop == 'shadow.color') {
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'shadow.opacity'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).shadow.opacity;
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'shadow.opacity'
-      );
-    });
-    newKeyframe('shadow.opacity', keyobj, time, keyval2, false);
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'shadow.offsetX'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).shadow.offsetX;
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'shadow.offsetX'
-      );
-    });
-    newKeyframe('shadow.offsetX', keyobj, time, keyval2, false);
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'shadow.offsetY'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).shadow.offsetY;
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'shadow.offsetY'
-      );
-    });
-    newKeyframe('shadow.offsetY', keyobj, time, keyval2, false);
-    var keyarr2 = $.grep(keyframes, function (e) {
-      return (
-        e.t == parseFloat(keytime) &&
-        e.id == drag.attr('data-object') &&
-        e.name == 'shadow.blur'
-      );
-    });
-    var keyval2 = keyarr2[0].value;
-    if (newval) {
-      keyval2 = canvas.getItemById(keyarr2[0].id).shadow.blur;
-    }
-    keyframes = $.grep(keyframes, function (e) {
-      return (
-        e.t != parseFloat(keytime) ||
-        e.id != drag.attr('data-object') ||
-        e.name != 'shadow.blur'
-      );
-    });
-    newKeyframe('shadow.blur', keyobj, time, keyval2, false);
-  }
-  if (offset) {
-    drag.attr('data-time', time);
-  } else {
-    drag.attr(
-      'data-time',
-      time + p_keyframes.find((x) => x.id == keyarr[0].id).start
-    );
-  }
-  keyframes.sort(function (a, b) {
-    if (a.id.indexOf('Group') >= 0 && b.id.indexOf('Group') == -1) {
-      return 1;
-    } else if (
-      b.id.indexOf('Group') >= 0 &&
-      a.id.indexOf('Group') == -1
-    ) {
-      return -1;
-    } else {
-      return 0;
-    }
+    newKeyframe(name, keyobj, time, value, false);
   });
+  drag.attr('data-time', time);
+  sortKeyframes();
 }
 
 function keyframeSnap(drag) {
@@ -5193,11 +4781,12 @@ function keyframeSnap(drag) {
       });
       $('#line-snap').addClass('line-active');
     } else {
+      let snapped = false;
       drag
         .parent()
         .parent()
         .find('.keyframe')
-        .each(function (index) {
+        .each(function () {
           if (!drag.is($(this))) {
             if (
               drag.offset().left > $(this).offset().left - 5 &&
@@ -5212,15 +4801,65 @@ function keyframeSnap(drag) {
                 height: drag.parent().parent().height(),
               });
               $('#line-snap').addClass('line-active');
+              snapped = true;
               return false;
             }
           }
-          if (index == $('.keyframe').length - 1) {
-            $('#line-snap').removeClass('line-active');
-          }
         });
+      if (!snapped) {
+        $('#line-snap').removeClass('line-active');
+      }
     }
   }
+}
+
+// Shared plumbing for the timeline drags (seekbar, keyframes, layer bars,
+// timeline resize handle). Captures the pointer so the matching pointerup
+// always comes back to us, and tears the drag down on pointercancel, on a
+// stray native dragstart, or when the window loses focus. Without this a
+// swallowed mouseup leaves the dragged element glued to the cursor.
+function bindPointerDrag(e, el, onMove, onEnd) {
+  var pointerId =
+    e.originalEvent && e.originalEvent.pointerId != undefined
+      ? e.originalEvent.pointerId
+      : null;
+  if (pointerId != null && el && el.setPointerCapture) {
+    try {
+      el.setPointerCapture(pointerId);
+    } catch (err) {}
+  }
+  function end(ev) {
+    // Ignore another pointer going up while this one is still dragging
+    if (
+      ev &&
+      ev.originalEvent &&
+      pointerId != null &&
+      ev.originalEvent.pointerId != undefined &&
+      ev.originalEvent.pointerId != pointerId
+    ) {
+      return;
+    }
+    $(document)
+      .off('pointermove', onMove)
+      .off('pointerup', end)
+      .off('pointercancel', end)
+      .off('dragstart', end);
+    window.removeEventListener('blur', end);
+    if (pointerId != null && el && el.releasePointerCapture) {
+      try {
+        el.releasePointerCapture(pointerId);
+      } catch (err) {}
+    }
+    onEnd(ev);
+  }
+  $(document)
+    .on('pointermove', onMove)
+    .on('pointerup', end)
+    .on('pointercancel', end)
+    .on('dragstart', end);
+  // Native listener on purpose: jQuery routes blur through its focus special
+  // event, which defers the handler and can drop it entirely
+  window.addEventListener('blur', end);
 }
 
 // Dragging a keyframe
@@ -5243,8 +4882,9 @@ function dragKeyframe(e) {
       });
       $(this).addClass('keyframe-selected');
     } else {
+      const el = this;
       shiftkeys = $.grep(shiftkeys, function (e) {
-        return e.keyframe != this;
+        return e.keyframe !== el;
       });
       $(this).removeClass('keyframe-selected');
     }
@@ -5281,9 +4921,6 @@ function dragKeyframe(e) {
     }
   }
   function releasedKeyframe(e) {
-    $('body')
-      .off('mousemove', draggingKeyframe)
-      .off('mouseup', releasedKeyframe);
     $('#line-snap').removeClass('line-active');
     if (move) {
       if (shiftkeys.length == 0) {
@@ -5321,18 +4958,16 @@ function dragKeyframe(e) {
           }
         });
       }
-    } else if (!e.shiftDown) {
+    } else if (e && e.type == 'pointerup' && !e.shiftKey) {
       keyframeProperties(inst);
     }
     move = false;
     $('.line-active').removeClass('line-active');
     save();
   }
-  $('body')
-    .on('mouseup', releasedKeyframe)
-    .on('mousemove', draggingKeyframe);
+  bindPointerDrag(e, this, draggingKeyframe, releasedKeyframe);
 }
-$(document).on('mousedown', '.keyframe', dragKeyframe);
+$(document).on('pointerdown', '.keyframe', dragKeyframe);
 
 // Render current time in the playback area
 function renderTime() {
@@ -5382,6 +5017,10 @@ function dragSeekBar(e) {
   if (e.which == 3) {
     return false;
   }
+  // Stop the browser from turning the press into a native drag-and-drop.
+  // When it does, the mouseup is swallowed, released() never runs and the
+  // seekbar stays glued to the pointer.
+  e.preventDefault();
   var drag = $(this);
   var pageX = e.pageX;
   var offset = $(this).offset();
@@ -5425,7 +5064,6 @@ function dragSeekBar(e) {
     renderTime();
   }
   function released(e) {
-    $('body').off('mousemove', dragging).off('mouseup', released);
     updateTime(drag, false);
     seeking = false;
     if (tempselection && tempselection.type != 'activeSelection') {
@@ -5433,9 +5071,17 @@ function dragSeekBar(e) {
     }
     updatePanelValues();
   }
-  $('body').on('mouseup', released).on('mousemove', dragging);
+  bindPointerDrag(e, this, dragging, released);
 }
-$(document).on('mousedown', '#seekbar', dragSeekBar);
+$(document).on('pointerdown', '#seekbar', dragSeekBar);
+// The timeline drag targets must never become native drag sources
+$(document).on(
+  'dragstart',
+  '#seekbar, .keyframe, .main-row, .row-el, .trim-row, #timeline-handle',
+  function (e) {
+    e.preventDefault();
+  }
+);
 
 // Dragging layer horizontally
 function dragObjectProps(e) {
@@ -5562,7 +5208,7 @@ function dragObjectProps(e) {
         setTimelineZoom(timelinetime);
       }
       drag.find('.keyframe').each(function () {
-        updateKeyframe($(this), false, true);
+        updateKeyframe($(this), false);
       });
       animate(false, currenttime);
     } else if (trim == 'left') {
@@ -5605,7 +5251,6 @@ function dragObjectProps(e) {
     }
   }
   function released(e) {
-    $('body').off('mousemove', dragging).off('mouseup', released);
     if (opened) {
       $(".layer[data-object='" + drag.attr('id') + "']")
         .find('.properties')
@@ -5621,9 +5266,9 @@ function dragObjectProps(e) {
     animate(false, currenttime);
     save();
   }
-  $('body').on('mouseup', released).on('mousemove', dragging);
+  bindPointerDrag(e, this, dragging, released);
 }
-$(document).on('mousedown', '.main-row', dragObjectProps);
+$(document).on('pointerdown', '.main-row', dragObjectProps);
 
 function resetHeight() {
   var top = $(window).height() - oldtimelinepos - 92;
@@ -5654,31 +5299,29 @@ function resetHeight() {
 
 // Dragging timeline vertically
 function dragTimeline(e) {
-  const disableselect = (e) => {  
-    return false  
-  }  
-  document.onselectstart = disableselect  
-  document.onmousedown = disableselect
-  
-  oldtimelinepos = e.pageY;
   if (e.which == 3) {
     return false;
   }
+  // Suppress text selection for the duration of the drag only - leaving these
+  // handlers installed kills mousedown for the whole document.
+  const disableselect = function () {
+    return false;
+  };
+  const previousSelectStart = document.onselectstart;
+  document.onselectstart = disableselect;
+
+  oldtimelinepos = e.pageY;
   function draggingKeyframe(e) {
     oldtimelinepos = e.pageY;
     resetHeight(e);
   }
   function releasedKeyframe(e) {
-    $('body')
-      .off('mousemove', draggingKeyframe)
-      .off('mouseup', releasedKeyframe);
+    document.onselectstart = previousSelectStart || null;
   }
-  $('body')
-    .on('mouseup', releasedKeyframe)
-    .on('mousemove', draggingKeyframe);
+  bindPointerDrag(e, this, draggingKeyframe, releasedKeyframe);
 }
 
-$(document).on('mousedown', '#timeline-handle', dragTimeline);
+$(document).on('pointerdown', '#timeline-handle', dragTimeline);
 
 oldtimelinepos = $(window).height() - 92 - $('#timearea').height();
 
@@ -5749,6 +5392,9 @@ function keyframeProperties(inst) {
         e.name == selectedkeyframe.attr('data-property')
       );
     });
+    if (keyarr.length == 0) {
+      return;
+    }
     $('#easing select').val(keyarr[0].easing);
     $('#easing select').niceSelect('update');
     popup.css({
@@ -5762,108 +5408,28 @@ function keyframeProperties(inst) {
 
 // Apply easing to keyframe
 function applyEasing() {
-  var keyarr = keyframes.filter(function (e) {
-    return (
-      e.t == selectedkeyframe.attr('data-time') &&
-      e.id == selectedkeyframe.attr('data-object') &&
-      e.name == selectedkeyframe.attr('data-property')
-    );
-  });
-  keyarr[0].easing = $(this).attr('data-value');
-  if (selectedkeyframe.attr('data-property') == 'left') {
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'top'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-  } else if (selectedkeyframe.attr('data-property') == 'scaleX') {
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'scaleY'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'width'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'height'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-  } else if (
-    selectedkeyframe.attr('data-property') == 'strokeWidth'
-  ) {
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'stroke'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-  } else if (
-    selectedkeyframe.attr('data-property') == 'shadow.color'
-  ) {
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'shadow.opacity'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'shadow.offsetX'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'shadow.offsetY'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'shadow.blur'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
-  } else if (
-    selectedkeyframe.attr('data-property') == 'charSpacing'
-  ) {
-    var keyarr = keyframes.filter(function (e) {
-      return (
-        e.t == selectedkeyframe.attr('data-time') &&
-        e.id == selectedkeyframe.attr('data-object') &&
-        e.name == 'lineHeight'
-      );
-    });
-    keyarr[0].easing = $('#easing select').val();
+  if (!selectedkeyframe) {
+    return;
   }
+  // Read the clicked item, not the underlying <select>: nice-select has not
+  // necessarily written the value back yet on mouseup.
+  const easing = $(this).attr('data-value');
+  const time = selectedkeyframe.attr('data-time');
+  const id = selectedkeyframe.attr('data-object');
+  const prop = selectedkeyframe.attr('data-property');
+  const names = [prop].concat(KEYFRAME_COUNTERPARTS[prop] || []);
+  names.forEach(function (name) {
+    keyframes
+      .filter(function (e) {
+        return e.t == time && e.id == id && e.name == name;
+      })
+      .forEach(function (e) {
+        e.easing = easing;
+      });
+  });
   $('#keyframe-properties').removeClass('show-properties');
   selectedkeyframe.removeClass('keyframe-selected');
+  animate(false, currenttime);
   save();
 }
 $(document).on('mouseup', '#easing li', applyEasing);

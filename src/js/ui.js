@@ -1,5 +1,8 @@
 // Update panel (when selecting / de-selecting objects)
 function updatePanel(selection) {
+  if (selection && !canvas.getActiveObject()) {
+    selection = false;
+  }
   if (!selection) {
     $('#align').addClass('align-off');
     $('#object-specific').html(canvas_panel);
@@ -330,17 +333,19 @@ function convertToHex(nonHexColorString) {
 
 function updateStrokeValues() {
   const object = canvas.getActiveObject();
+  if (!object) {
+    return;
+  }
   $('.line-join-active').removeClass('line-join-active');
-  if (
-    object.get('strokeDashArray') == false &&
-    object.get('strokeWidth') == 0
-  ) {
+  const dash = object.get('strokeDashArray');
+  const hasDash = Array.isArray(dash) && dash.length > 0;
+  if (!hasDash && object.get('strokeWidth') == 0) {
     $('#miter').addClass('line-join-active');
     $('#miter img').attr('src', 'assets/miter-active.svg');
-  } else if (object.get('strokeDashArray') == false) {
+  } else if (!hasDash) {
     $('#bevel').addClass('line-join-active');
     $('#bevel img').attr('src', 'assets/bevel-active.svg');
-  } else if (object.get('strokeDashArray') == [10, 5]) {
+  } else if (dash[0] == 10 && dash[1] == 5) {
     $('#round').addClass('line-join-active');
     $('#round img').attr('src', 'assets/round-active.svg');
   } else {
@@ -350,39 +355,39 @@ function updateStrokeValues() {
 }
 
 function toggleAnimationOrder() {
-  var object = canvas.getActiveObject();
+  const text = activeAnimatedText();
+  if (!text) {
+    return;
+  }
   $('.order-toggle-item-active').removeClass(
     'order-toggle-item-active'
   );
   if ($(this).attr('id') == 'order-backward') {
-    animatedtext
-      .find((x) => x.id == object.id)
-      .setProp({ order: 'backward' }, canvas);
+    text.setProp({ order: 'backward' });
   } else if ($(this).attr('id') == 'order-forward') {
-    animatedtext
-      .find((x) => x.id == object.id)
-      .setProp({ order: 'forward' }, canvas);
+    text.setProp({ order: 'forward' });
   }
   $(this).addClass('order-toggle-item-active');
-  animate(currenttime, false);
+  // animate(play, time) - the arguments used to be the other way round, so
+  // the canvas never refreshed after changing a text animation.
+  animate(false, currenttime);
   save();
 }
 function toggleAnimationType() {
-  var object = canvas.getActiveObject();
+  const text = activeAnimatedText();
+  if (!text) {
+    return;
+  }
   $('.order-toggle-item-active-2').removeClass(
     'order-toggle-item-active-2'
   );
   if ($(this).attr('id') == 'type-words') {
-    animatedtext
-      .find((x) => x.id == object.id)
-      .setProp({ typeAnim: 'word' }, canvas);
+    text.setProp({ typeAnim: 'word' });
   } else if ($(this).attr('id') == 'type-letters') {
-    animatedtext
-      .find((x) => x.id == object.id)
-      .setProp({ typeAnim: 'letter' }, canvas);
+    text.setProp({ typeAnim: 'letter' });
   }
   $(this).addClass('order-toggle-item-active-2');
-  animate(currenttime, false);
+  animate(false, currenttime);
   save();
 }
 $(document).on(
@@ -473,7 +478,7 @@ function updatePanelValues() {
     var tempstore = false;
     var object = canvas.getActiveObject();
     if (
-      canvas.getActiveObjects.length > 1 ||
+      canvas.getActiveObjects().length > 1 ||
       object.get('type') == 'activeSelection'
     ) {
       object = object.toGroup();
@@ -590,7 +595,8 @@ function updatePanelValues() {
 
 // Update opacity input
 function updateInputs(id) {
-  if (canvas.getActiveObject().get('assetType') == 'audio') {
+  const active = canvas.getActiveObject();
+  if (!active || active.get('assetType') == 'audio') {
     return false;
   }
   if ($('#object-o input').val() > 100) {
@@ -604,7 +610,7 @@ function updateInputs(id) {
     id == 'object-color-fill-opacity'
   ) {
     if ($('#object-color-fill-opacity input').val() > 100) {
-      $('#object-color-fill-opacity').val(100);
+      $('#object-color-fill-opacity input').val(100);
     } else if ($('#object-color-fill-opacity input').val() < 0) {
       $('#object-color-fill-opacity input').val(0);
     }
@@ -628,7 +634,7 @@ function updateInputs(id) {
     id == 'object-color-stroke-opacity'
   ) {
     if ($('#object-color-stroke-opacity input').val() > 100) {
-      $('#object-color-stroke-opacity').val(100);
+      $('#object-color-stroke-opacity input').val(100);
     } else if ($('#object-color-stroke-opacity input').val() < 0) {
       $('#object-color-stroke-opacity input').val(0);
     }
@@ -652,7 +658,7 @@ function updateInputs(id) {
     id == 'object-color-shadow-opacity'
   ) {
     if ($('#object-color-shadow-opacity input').val() > 100) {
-      $('#object-color-shadow-opacity').val(100);
+      $('#object-color-shadow-opacity input').val(100);
     } else if ($('#object-color-shadow-opacity input').val() < 0) {
       $('#object-color-shadow-opacity input').val(0);
     }
@@ -673,7 +679,6 @@ function updateInputs(id) {
 
 // Update object position based on panel input values
 function updateObjectValues(type) {
-  autoSave();
   if (canvas.getActiveObjects().length > 0) {
     if ($(this).find('input').val() || type) {
       var object = canvas.getActiveObject();
@@ -832,14 +837,11 @@ function updateObjectValues(type) {
   }
 }
 function setTextAnimation() {
-  var object = canvas.getActiveObject();
-  animatedtext
-    .find((x) => x.id == object.id)
-    .reset(
-      $(this).parent().find('input').val(),
-      animatedtext.find((x) => x.id == object.id).props,
-      canvas
-    );
+  const text = activeAnimatedText();
+  if (!text) {
+    return;
+  }
+  text.reset($(this).parent().find('input').val(), text.props, canvas);
 }
 
 $(document).on('input', '.property-input', updateObjectValues);
@@ -850,8 +852,10 @@ $(document).on('click', '#animatedset', setTextAnimation);
 // Toggle picker (maybe it could be condensed?)
 function togglePicker() {
   const object = canvas.getActiveObject();
+  if (!object && $(this).attr('id') != 'canvas-color') {
+    return;
+  }
   if (!o_fill.isOpen()) {
-    newcolorkeyframe = true;
     if ($(this).attr('id') == 'object-color-fill') {
       colormode = 'fill';
       o_fill.setColor(object.get('fill'));
@@ -879,7 +883,6 @@ function togglePicker() {
       colormode = 'shadow';
       o_fill.setColor(object.shadow.color);
     }
-    newcolorkeyframe = false;
     o_fill.show();
   } else {
     o_fill.hide();
@@ -917,6 +920,7 @@ function populateGrid(type) {
     });
   } else if (type == 'image-tool') {
     $('#images-grid').html('');
+    $('#categories').html('');
     image_categories.forEach(function (category) {
       $('#categories').append(
         "<div class='category' data-name='" +
@@ -930,6 +934,7 @@ function populateGrid(type) {
     });
   } else if (type == 'video-tool') {
     $('#images-grid').html('');
+    $('#categories').html('');
     video_categories.forEach(function (category) {
       $('#categories').append(
         "<div class='category' data-name='" +
@@ -959,7 +964,7 @@ function populateGrid(type) {
               item.key +
               "'><img class='delete-media' draggable=false src='assets/more-options.svg'><img draggable=false onload='onLoadImage(this)' class='image-thing' src='" +
               item.thumb +
-              "'</div>"
+              "'></div>"
           );
         }
       });
@@ -999,6 +1004,7 @@ function populateGrid(type) {
     }
   } else if (type == 'audio-tool') {
     var flag = false;
+    $('#audio-list').html('');
     audio_items.forEach(function (item) {
       if (item.src == background_key) {
         flag = true;
@@ -1015,7 +1021,7 @@ function populateGrid(type) {
             item.desc +
             "</a><div class='audio-info-duration'>" +
             item.duration +
-            '</div></div></div></div>'
+            '</div></div></div>'
         );
       } else {
         $('#audio-list').append(
@@ -1031,7 +1037,7 @@ function populateGrid(type) {
             item.desc +
             "</a><div class='audio-info-duration'>" +
             item.duration +
-            '</div></div></div></div>'
+            '</div></div></div>'
         );
       }
     });
@@ -1057,7 +1063,7 @@ function populateGrid(type) {
         },
       });
       $('#shapes-cont').append(
-        "<div id='item-text' class='add-text noselect' data-font='" +
+        "<div class='item-text add-text noselect' data-font='" +
           text.fontname +
           "' style='font-family: " +
           text.fontname +
@@ -1074,7 +1080,7 @@ function populateGrid(type) {
         },
       });
       $('#shapes-cont').append(
-        "<div id='item-text' class='add-text noselect' data-font='" +
+        "<div class='item-text add-text noselect' data-font='" +
           text.fontname +
           "' style='font-family: " +
           text.fontname +
@@ -1091,7 +1097,7 @@ function populateGrid(type) {
         },
       });
       $('#shapes-cont').append(
-        "<div id='item-text' class='add-text noselect' data-font='" +
+        "<div class='item-text add-text noselect' data-font='" +
           text.fontname +
           "' style='font-family: " +
           text.fontname +
@@ -1108,7 +1114,7 @@ function populateGrid(type) {
         },
       });
       $('#shapes-cont').append(
-        "<div id='item-text' class='add-text noselect' data-font='" +
+        "<div class='item-text add-text noselect' data-font='" +
           text.fontname +
           "' style='font-family: " +
           text.fontname +
@@ -1125,7 +1131,7 @@ function populateGrid(type) {
         },
       });
       $('#shapes-cont').append(
-        "<div id='item-text' class='add-text noselect' data-font='" +
+        "<div class='item-text add-text noselect' data-font='" +
           text.fontname +
           "' style='font-family: " +
           text.fontname +
@@ -1175,27 +1181,27 @@ function updateBrowser(type) {
   if (type == 'image-tool') {
     $('#browser-container').html(image_browser);
     populateGrid(type);
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   } else if (type == 'shape-tool') {
     $('#browser-container').html(shape_browser);
     populateGrid(type);
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   } else if (type == 'video-tool') {
     $('#browser-container').html(video_browser);
     populateGrid(type);
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   } else if (type == 'text-tool') {
     $('#browser-container').html(text_browser);
     populateGrid(type);
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   } else if (type == 'upload-tool') {
     $('#browser-container').html(upload_browser);
     populateGrid('images-tab');
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   } else if (type == 'audio-tool') {
     $('#browser-container').html(audio_browser);
     populateGrid(type);
-    $('#browser').on('scroll', scrollBottom);
+    $('#browser').off('scroll', scrollBottom).on('scroll', scrollBottom);
   }
 }
 
@@ -1260,16 +1266,23 @@ $(document).on('click', '.tool:not(.tool-active)', switchTool);
 
 // Replace image or video by dragging on top and holding a key
 function replaceObject(src, object) {
+  if (!src || !object) {
+    return;
+  }
   var img = new Image();
   var width = object.width;
   var height = object.height;
-  oldsrc = object._originalElement.currentSrc;
+  const element = object.getElement();
+  oldsrc = element ? element.currentSrc || element.src : null;
   oldobj = object;
   img.onload = function () {
     object.setElement(img);
     object.set('width', width);
     object.set('height', height);
     canvas.renderAll();
+  };
+  img.onerror = function () {
+    console.warn('Could not load replacement image');
   };
   img.src = src;
 }
@@ -1339,7 +1352,9 @@ function dragObject(e) {
       (replacing && !e.ctrlKey)
     ) {
       drag.css('visibility', 'visible');
-      replaceObject(oldsrc, oldobj);
+      if (oldsrc && oldobj) {
+        replaceObject(oldsrc, oldobj);
+      }
       replacing = false;
       canvas.discardActiveObject();
       $('#replace-image').removeClass('replace-active');
@@ -1361,7 +1376,21 @@ function dragObject(e) {
     $('#properties').removeClass('noselect');
     $('#controls').removeClass('noselect');
     draggingPanel = false;
-    $('body').off('mousemove', dragging).off('mouseup', released);
+    // An aborted drag (pointercancel, a stray native dragstart, or the window
+    // losing focus) carries no pointer position, so there is nowhere to drop.
+    // Undo any in-progress replacement and bin the ghost.
+    if (!e || e.type != 'pointerup') {
+      if (replacing) {
+        if (oldsrc && oldobj) {
+          replaceObject(oldsrc, oldobj);
+        }
+        replacing = false;
+        canvas.discardActiveObject();
+        canvas.renderAll();
+      }
+      drag.remove();
+      return false;
+    }
     canvasx = canvas.getPointer(e).x;
     canvasy = canvas.getPointer(e).y;
     var xpos = canvasx + offsetx - artboard.get('left');
@@ -1561,16 +1590,32 @@ function dragObject(e) {
     }
     drag.remove();
   }
-  $('body').on('mouseup', released).on('mousemove', dragging);
+  // No pointer capture here (unlike the timeline drags): the drop target is
+  // worked out from the canvas hover state, and capturing would retarget those
+  // events to the panel item and leave overCanvas permanently false.
+  bindPointerDrag(e, null, dragging, released);
 }
-$(document).on('mousedown', '.image-grid-item', dragObject);
-$(document).on('mousedown', '.video-grid-item', dragObject);
-$(document).on('mousedown', '.grid-item', dragObject);
-$(document).on('mousedown', '.grid-emoji-item', dragObject);
-$(document).on('mousedown', '.add-text', dragObject);
-$(document).on('mousedown click mouseup', '.credit', function (e) {
-  e.stopPropagation();
-});
+$(document).on('pointerdown', '.image-grid-item', dragObject);
+$(document).on('pointerdown', '.video-grid-item', dragObject);
+$(document).on('pointerdown', '.grid-item', dragObject);
+$(document).on('pointerdown', '.grid-emoji-item', dragObject);
+$(document).on('pointerdown', '.add-text', dragObject);
+$(document).on(
+  'pointerdown mousedown click mouseup',
+  '.credit',
+  function (e) {
+    e.stopPropagation();
+  }
+);
+// Panel items must never become native drag sources - a native drag swallows
+// the pointerup and leaves the dragged ghost stuck to the cursor
+$(document).on(
+  'dragstart',
+  '.image-grid-item, .video-grid-item, .grid-item, .grid-emoji-item, .add-text, .credit',
+  function (e) {
+    e.preventDefault();
+  }
+);
 
 // Collapse library
 function collapsePanel() {
@@ -1613,18 +1658,29 @@ function setPreset() {
 }
 $(document).on('change', '#preset', setPreset);
 
+function activeAnimatedText() {
+  const object = canvas.getActiveObject();
+  if (!object) {
+    return null;
+  }
+  return animatedtext.find((x) => x.id == object.id) || null;
+}
 function setTextPreset() {
-  var object = canvas.getActiveObject();
-  animatedtext
-    .find((x) => x.id == object.id)
-    .setProp({ preset: $(this).val() }, canvas);
+  const text = activeAnimatedText();
+  if (!text) {
+    return;
+  }
+  text.setProp({ preset: $(this).val() });
+  animate(false, currenttime);
   save();
 }
 function setTextEasing() {
-  var object = canvas.getActiveObject();
-  animatedtext
-    .find((x) => x.id == object.id)
-    .setProp({ easing: $(this).val() }, canvas);
+  const text = activeAnimatedText();
+  if (!text) {
+    return;
+  }
+  text.setProp({ easing: $(this).val() });
+  animate(false, currenttime);
   save();
 }
 $(document).on('change', '#preset-picker', setTextPreset);
@@ -1651,11 +1707,14 @@ function saveLayerName() {
   if ($('.name-active').val() == '') {
     $('.name-active').val('Untitled layer');
   }
-  objects.find(
+  const entry = objects.find(
     (x) =>
       x.id == $('.name-active').parent().parent().attr('data-object')
-  ).label = $('.name-active').val();
-  save();
+  );
+  if (entry) {
+    entry.label = $('.name-active').val();
+    save();
+  }
   $('.name-active').removeClass('name-active');
   if (window.getSelection) {
     if (window.getSelection().empty) {
@@ -1750,6 +1809,9 @@ function fancyTimeFormat(duration) {
 
 function loadMoreMedia() {
   var value = $('#browser-search input').val();
+  if (!HAS_PIXABAY_KEY) {
+    return;
+  }
   if (value != '' && page != false) {
     page += 1;
     if ($('#image-tool').hasClass('tool-active')) {
@@ -1772,7 +1834,7 @@ function loadMoreMedia() {
                 hit.user +
                 "</a><img draggable=false onload='onLoadImage(this)' src='" +
                 hit.webformatURL +
-                "'</div>"
+                "'></div>"
             );
           });
         } else {
@@ -1800,7 +1862,7 @@ function loadMoreMedia() {
                 hit.user +
                 "</a><div id='time-video'>" +
                 fancyTimeFormat(hit.duration) +
-                "</div><img draggable=false onload='onLoadImage(this)' src='assets/transparent.png'</div>"
+                "</div><img draggable=false onload='onLoadImage(this)' src='assets/transparent.png'></div>"
             );
             createVideoThumbnail(video, 250, 0, true).then(function (
               data
@@ -1821,6 +1883,15 @@ function loadMoreMedia() {
 function search() {
   page = 1;
   var value = $('#browser-search input').val();
+  const pixabaySearch =
+    $('#image-tool').hasClass('tool-active') ||
+    $('#video-tool').hasClass('tool-active');
+  if (pixabaySearch && !HAS_PIXABAY_KEY) {
+    $('#shapes-cont').html(
+      "<div id='no-results'>Image and video search needs a Pixabay API key. Set API_KEY in js/init.js.</div>"
+    );
+    return;
+  }
   if ($('#image-tool').hasClass('tool-active')) {
     var URL =
       'https://pixabay.com/api/?key=' +
@@ -1845,7 +1916,7 @@ function search() {
                 hit.user +
                 "</a><img draggable=false onload='onLoadImage(this)' src='" +
                 hit.webformatURL +
-                "'</div>"
+                "'></div>"
             );
           });
         } else {
@@ -1883,7 +1954,7 @@ function search() {
                 hit.user +
                 "</a><div id='time-video'>" +
                 fancyTimeFormat(hit.duration) +
-                "</div><img draggable=false onload='onLoadImage(this)' src='assets/transparent.png'</div>"
+                "</div><img draggable=false onload='onLoadImage(this)' src='assets/transparent.png'></div>"
             );
             //createVideoThumbnail(video, 250, 0, true).then(function(data){
             $(".image-grid-item[data-src='" + video + "']")
@@ -1963,7 +2034,7 @@ function search() {
             },
           });
           $('#shapes-cont').append(
-            "<div id='item-text' class='add-text noselect' data-font='" +
+            "<div class='item-text add-text noselect' data-font='" +
               font +
               "' style='font-family: " +
               font +
@@ -2069,10 +2140,7 @@ function checkFilter() {
   resetFilters();
   if (canvas.getActiveObject()) {
     var obj = canvas.getActiveObject();
-    if (
-      canvas.getActiveObjects().length == 1 &&
-      (obj.type == 'image' || obj.type == 'video')
-    ) {
+    if (canvas.getActiveObjects().length == 1 && obj.filters) {
       var value = 'none';
       if (obj.filters.length > 0) {
         obj.filters.forEach(function (filter) {
@@ -2224,6 +2292,9 @@ $(document).on('click', '#reset-filters', removeFilters);
 function updateChromaValues() {
   if (canvas.getActiveObject()) {
     var obj = canvas.getActiveObject();
+    if (!obj.filters) {
+      return;
+    }
     if ($('.status-active').attr('id') == 'status-on') {
       if (obj.filters.find((x) => x.type == 'RemoveColor')) {
         obj.filters.find((x) => x.type == 'RemoveColor').distance =
@@ -2264,7 +2335,8 @@ function updateChromaUI() {
           $('.status-active').removeClass('status-active');
           $('#status-on').addClass('status-active');
           chromaslider.setValue(
-            obj.filters.find((x) => x.type == 'RemoveColor').distance
+            obj.filters.find((x) => x.type == 'RemoveColor').distance *
+              100
           );
           $('#chroma-color input').val(
             obj.filters.find((x) => x.type == 'RemoveColor').color
@@ -2278,7 +2350,7 @@ function updateChromaUI() {
           $('#status-off').addClass('status-active');
           chromaslider.setValue(1);
           $('#chroma-color input').val('#FFFFFF');
-          $('#color-chroma-side').css('background-color', '#FFFFF');
+          $('#color-chroma-side').css('background-color', '#FFFFFF');
         }
       }
     }
@@ -2350,13 +2422,24 @@ function hideMore() {
 
 function handleLottieUpload() {
   var filething = $('#filepick3').get(0).files;
+  if (!filething || filething.length == 0) {
+    return;
+  }
   var reader = new FileReader();
   reader.onload = function (event) {
-    newLottieAnimation(
-      artboard.get('left') + artboard.get('width') / 2,
-      artboard.get('top') + artboard.get('height') / 2,
-      event.target.result
-    );
+    try {
+      newLottieAnimation(
+        artboard.get('left') + artboard.get('width') / 2,
+        artboard.get('top') + artboard.get('height') / 2,
+        event.target.result
+      );
+    } catch (e) {
+      console.error(e);
+      alert('That does not look like a valid Lottie file');
+    }
+  };
+  reader.onerror = function () {
+    alert('Could not read the file');
   };
   reader.readAsDataURL(filething.item(0));
 }

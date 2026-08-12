@@ -734,7 +734,7 @@ body {
   height: 28px;
   line-height: 28px;
 }
-#item-text {
+.item-text {
   font-size: 16px;
   font-weight: 500;
   height: 34px;
@@ -1418,7 +1418,8 @@ input[type="number"] {
 /* Download modal */
 #download-modal {
   width: 300px;
-  height: 255px;
+  /* Grows with its content: the frame rate row is hidden for image exports */
+  padding-bottom: 20px;
   background-color: var(--panel-back);
   border: 1px solid var(--panel-stroke);
   border-radius: 5px;
@@ -1462,6 +1463,28 @@ input[type="number"] {
 #radio {
   margin-left: 10px;
   margin-bottom: 20px;
+}
+#framerate-row {
+  margin-bottom: 20px;
+}
+#framerate-row .subheader {
+  margin-bottom: 8px;
+}
+#framerate {
+  background-color: var(--input-color);
+  border: none;
+  border-radius: 5px;
+  color: var(--main-text-color);
+  font-family: Inter;
+  font-size: 14px;
+  height: 35px;
+  outline: none;
+  padding-left: 11px;
+  width: calc(100% - 40px);
+  margin-left: 20px;
+}
+#framerate:hover {
+  cursor: pointer;
 }
 .magic-radio:checked + label:before {
   background-color: var(--accent-color) !important;
@@ -1626,6 +1649,46 @@ layer:nth-child(even) .properties {
   font-size: 14px;
   text-indent: 25px;
   display: inline-block;
+  position: relative;
+}
+.layer-handle {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 9px;
+  height: 16px;
+  text-indent: 0;
+  opacity: 0.3;
+  cursor: grab;
+  background-image: radial-gradient(
+    currentColor 1px,
+    transparent 1.5px
+  );
+  background-size: 4px 5px;
+  background-position: 1px 2px;
+  transition: opacity 0.15s ease;
+}
+.layer:hover .layer-handle {
+  opacity: 0.7;
+}
+.layer .layer-handle:hover {
+  opacity: 1;
+}
+.layer-handle:active {
+  cursor: grabbing;
+}
+.layer-handle[draggable="false"] {
+  cursor: not-allowed;
+  opacity: 0.15 !important;
+}
+.sortable-placeholder {
+  height: 35px;
+  margin-bottom: 2px;
+  box-sizing: border-box;
+  border: 1px dashed var(--accent-color);
+  border-radius: 3px;
+  background: rgba(0, 122, 255, 0.12);
 }
 .layer-custom-name {
   background: transparent;
@@ -2020,6 +2083,33 @@ layer:nth-child(even) .properties {
   z-index: 99999999;
   pointer-events: all;
   top: 0px;
+  /* Never let the browser start a native drag or a selection on the seekbar */
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+#seekbar:after,
+#seek-hover {
+  -webkit-user-drag: none;
+}
+/* Same for the other timeline drag targets */
+.keyframe,
+.main-row,
+.row-el,
+.trim-row,
+#timeline-handle {
+  -webkit-user-drag: none;
+  touch-action: none;
+}
+/* And for the library panel items dragged onto the canvas */
+.image-grid-item,
+.video-grid-item,
+.grid-item,
+.grid-emoji-item,
+.add-text,
+.credit {
+  -webkit-user-drag: none;
 }
 #seekbar:hover {
   outline: 3px solid rgba(255, 255, 255, 0.1);
@@ -2438,10 +2528,10 @@ layer:nth-child(even) .properties {
 	margin-top: -45px;
 	box-shadow: 0px 8px 4px -4px rgb(12 13 26 / 50%);
 }
-#filters-header #filters-title {
+#filters-header .filters-title {
 	margin-top: 0px!important;
 }
-#filters-title {
+.filters-title {
 	color: var(--main-text-color);
 	font-size: 14px;
 	font-weight: 500;

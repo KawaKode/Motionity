@@ -596,7 +596,12 @@ function writeEBML(buffer, bufferFileOffset, ebml) {
       buffer.writeEBMLVarInt(4);  // Size field
       ebml.dataOffset = buffer.pos + bufferFileOffset;
       buffer.writeFloatBE(ebml.data.value);
-    } else if (ebml.data instanceof Uint8Array) {
+    } else if (
+        ebml.data instanceof Uint8Array ||
+        (ArrayBuffer.isView(ebml.data) &&
+         ebml.data.BYTES_PER_ELEMENT === 1)) {
+      // isView as well as instanceof: a byte array that crossed a realm
+      // boundary (worker, vm context) fails the instanceof check
       buffer.writeEBMLVarInt(ebml.data.byteLength);  // Size field
       ebml.dataOffset = buffer.pos + bufferFileOffset;
       buffer.writeBytes(ebml.data);
@@ -630,7 +635,8 @@ function writeEBML(buffer, bufferFileOffset, ebml) {
  */
 let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
   return function(options) {
-    let MAX_CLUSTER_DURATION_MSEC = 5000000, DEFAULT_TRACK_NUMBER = 1,
+    let MAX_CLUSTER_DURATION_MSEC = 5000, DEFAULT_TRACK_NUMBER = 1,
+        AUDIO_TRACK_NUMBER = 2,
         writtenHeader = false, videoWidth = 0, videoHeight = 0,
         firstTimestampEver = true, earliestTimestamp = 0,
 
@@ -649,6 +655,9 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
                      // (optional)
       codec: 'VP8',  // Codec to write to webm file
 
+      // Optional second track holding Opus audio. Supply:
+      //   {sampleRate, channels, codecPrivate: Uint8Array (OpusHead)}
+      audio: null,
     },
 
     seekPoints = {
@@ -787,9 +796,7 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
             }
           ];
 
-      let tracks = {
-        'id': 0x1654ae6b,  // Tracks
-        'data': [{
+      let trackEntries = [{
           'id': 0xae,  // TrackEntry
           'data': [
             {
@@ -868,7 +875,87 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
                'data': options.codec
              },*/
           ]
-        }]
+        }];
+
+      // Optional Opus audio track.
+      // CodecPrivate must be an OpusHead block, and Opus needs the pre-roll
+      // hints or players will start it with audible artefacts.
+      if (options.audio) {
+        trackEntries.push({
+          'id': 0xae,  // TrackEntry
+          'data': [
+            {
+              'id': 0xd7,  // TrackNumber
+              'data': AUDIO_TRACK_NUMBER
+            },
+            {
+              'id': 0x73c5,  // TrackUID
+              'data': AUDIO_TRACK_NUMBER
+            },
+            {
+              'id': 0x83,  // TrackType (2 = audio)
+              'data': 2
+            },
+            {
+              'id': 0x9c,  // FlagLacing
+              'data': 0
+            },
+            {
+              'id': 0x22b59c,  // Language
+              'data': 'und'
+            },
+            {
+              'id': 0xb9,  // FlagEnabled
+              'data': 1
+            },
+            {
+              'id': 0x88,  // FlagDefault
+              'data': 1
+            },
+            {
+              'id': 0x55aa,  // FlagForced
+              'data': 0
+            },
+            {
+              'id': 0x86,  // CodecID
+              'data': 'A_OPUS'
+            },
+            {
+              'id': 0x63A2,  // CodecPrivate
+              'data': options.audio.codecPrivate
+            },
+            {
+              'id': 0x56AA,  // CodecDelay (ns)
+              'data': 6500000
+            },
+            {
+              'id': 0x56BB,  // SeekPreRoll (ns)
+              'data': 80000000
+            },
+            {
+              'id': 0xe1,  // Audio
+              'data': [
+                {
+                  'id': 0xb5,  // SamplingFrequency
+                  'data': new EBMLFloat64(options.audio.sampleRate)
+                },
+                {
+                  'id': 0x9f,  // Channels
+                  'data': options.audio.channels
+                },
+                {
+                  'id': 0x6264,  // BitDepth
+                  'data': 32
+                }
+              ]
+            }
+          ]
+        });
+      }
+
+      let tracks = {
+        'id': 0x1654ae6b,  // Tracks
+        'data': trackEntries
       };
 
       ebmlSegment = {
@@ -881,7 +968,9 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
         ]
       };
 
-      let bufferStream = new ArrayBufferDataStream(256);
+      // Has to fit the header, SeekHead, SegmentInfo and every TrackEntry.
+      // 256 was only ever enough for a single video track.
+      let bufferStream = new ArrayBufferDataStream(1024);
 
       writeEBML(bufferStream, blobBuffer.pos, [ebmlHeader, ebmlSegment]);
       blobBuffer.write(bufferStream.getAsDataArray());
@@ -1036,7 +1125,7 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
      * @param {Frame} frame
      */
     function addFrameToCluster(frame) {
-        frame.trackNumber = DEFAULT_TRACK_NUMBER;
+        frame.trackNumber = frame.trackNumber || DEFAULT_TRACK_NUMBER;
         var time = frame.intime / 1000;
         if (firstTimestampEver) {
           earliestTimestamp = time;
@@ -1045,19 +1134,30 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
         } else {
           time = time - earliestTimestamp;
         }
-        lastTimeCode = time;
-        if (clusterDuration == 0) clusterStartTime = time;
+        if (time > lastTimeCode) {
+          lastTimeCode = time;
+        }
+
+        // Start a new cluster on a video keyframe once the current one has
+        // grown past the limit. SimpleBlock timecodes are a signed 16 bit
+        // offset from the cluster, so clusters cannot span more than ~32s.
+        const isVideoKeyframe =
+            frame.trackNumber == DEFAULT_TRACK_NUMBER && frame.type == 'key';
+        if (
+          clusterFrameBuffer.length > 0 && isVideoKeyframe &&
+          time - clusterStartTime >= MAX_CLUSTER_DURATION_MSEC) {
+          flushClusterFrameBuffer();
+        }
+
+        if (clusterFrameBuffer.length === 0) {
+          clusterStartTime = time;
+        }
 
         // Frame timecodes are relative to the start of their cluster:
-        // frame.timecode = Math.round(clusterDuration);
         frame.timecode = Math.round(time - clusterStartTime);
 
         clusterFrameBuffer.push(frame);
         clusterDuration = frame.timecode + 1;
-
-        if (clusterDuration >= MAX_CLUSTER_DURATION_MSEC) {
-          flushClusterFrameBuffer();
-        }
       }
 
       /**
@@ -1106,22 +1206,31 @@ let WebMWriter = function(ArrayBufferDataStream, BlobBuffer) {
        * toDataUrl() on an image yourself.
        *
        */
-      this.addFrame = function(frame) {
+      this.addFrame = function(frame, trackNumber) {
         if (!writtenHeader) {
           videoWidth = options.width;
           videoHeight = options.height;
           writeHeader();
         }
-        if (frame.constructor.name == 'EncodedVideoChunk') {
+        const name = frame.constructor.name;
+        if (name == 'EncodedVideoChunk' || name == 'EncodedAudioChunk') {
           let frameData = new Uint8Array(frame.byteLength);
           frame.copyTo(frameData);
           addFrameToCluster({
             frame: frameData,
             intime: frame.timestamp,
             type: frame.type,
+            trackNumber: trackNumber ||
+                (name == 'EncodedAudioChunk' ? AUDIO_TRACK_NUMBER :
+                                              DEFAULT_TRACK_NUMBER),
           });
           return;
         }
+      };
+
+      // Encoded audio for the optional second track
+      this.addAudioChunk = function(chunk) {
+        this.addFrame(chunk, AUDIO_TRACK_NUMBER);
       };
 
       /**

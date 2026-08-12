@@ -1,0 +1,15 @@
+services:
+  motionity:
+    build:
+      context: .
+      # WITH_FFMPEG: "0" trims 18.5 MB by fetching the MP4/GIF encoder from
+      # archive.org at runtime instead of shipping it.
+      args:
+        WITH_FFMPEG: "1"
+    image: motionity:latest
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true

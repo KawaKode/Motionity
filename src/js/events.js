@@ -1,17 +1,79 @@
+// Remember the last valid crop rectangle so it can be restored if the user
+// drags it outside the image.
+function updateCropBounds() {
+  const cropUI = canvas.getItemById('crop');
+  if (!cropUI || !cropobj) {
+    return;
+  }
+  if (cropUI.isContainedWithinObject(cropobj)) {
+    cropleft = cropUI.get('left');
+    croptop = cropUI.get('top');
+    cropscalex = cropUI.get('scaleX');
+    cropscaley = cropUI.get('scaleY');
+  }
+}
+
+// Drag-to-reorder for the layer list. html5sortable only wires up the
+// children present when it runs, so this is re-run every time a layer is
+// added. The sortstop handler is bound only once.
+let layerSortBound = false;
+function initLayerSortable() {
+  const list = document.getElementById('layer-inner-list');
+  if (!list) {
+    return;
+  }
+  const sortableList = sortable(list, {
+    handle: '.layer-handle',
+    customDragImage: (draggedElement, elementOffset, event) => {
+      return {
+        element: document.getElementById('nothing'),
+        posX: event.pageX - elementOffset.left,
+        posY: event.pageY - elementOffset.top,
+      };
+    },
+  })[0];
+
+  // Re-initializing marks every handle draggable again, so locked layers
+  // have to be opted back out.
+  $('#layer-inner-list .layer').each(function () {
+    if ($(this).find('.lock').hasClass('locked')) {
+      $(this).find('.layer-handle').attr('draggable', false);
+    }
+  });
+
+  if (layerSortBound) {
+    return;
+  }
+  layerSortBound = true;
+  sortableList.addEventListener('sortupdate', function () {
+    syncTimelineOrder();
+    orderLayers();
+  });
+}
+
+// Re-order the timeline rows to match the layer list
+function syncTimelineOrder() {
+  const timeline = document.getElementById('inner-timeline');
+  if (!timeline) {
+    return;
+  }
+  $('#layer-inner-list .layer').each(function () {
+    const row = document.getElementById(
+      $(this).attr('data-object')
+    );
+    if (row) {
+      timeline.appendChild(row);
+    }
+  });
+}
+
 $(document).ready(function () {
   // An object is being moved in the canvas
   canvas.on('object:moving', function (e) {
     e.target.hasControls = false;
     centerLines(e);
     if (cropping) {
-      if (
-        canvas.getItemById('crop').isContainedWithinObject(cropobj)
-      ) {
-        cropleft = canvas.getItemById('crop').get('left');
-        croptop = canvas.getItemById('crop').get('top');
-        cropscalex = canvas.getItemById('crop').get('scaleX');
-        cropscaley = canvas.getItemById('crop').get('scaleY');
-      }
+      updateCropBounds();
       crop(canvas.getItemById('cropped'));
     } else if (
       lockmovement &&
@@ -39,14 +101,7 @@ $(document).ready(function () {
     e.target.hasControls = false;
     centerLines(e);
     if (cropping) {
-      if (
-        canvas.getItemById('crop').isContainedWithinObject(cropobj)
-      ) {
-        cropleft = canvas.getItemById('crop').get('left');
-        croptop = canvas.getItemById('crop').get('top');
-        cropscalex = canvas.getItemById('crop').get('scaleX');
-        cropscaley = canvas.getItemById('crop').get('scaleY');
-      }
+      updateCropBounds();
       crop(canvas.getItemById('cropped'));
     }
   });
@@ -56,24 +111,15 @@ $(document).ready(function () {
     e.target.hasControls = false;
     centerLines(e);
     if (cropping) {
-      if (
-        canvas.getItemById('crop').isContainedWithinObject(cropobj)
-      ) {
-        cropleft = canvas.getItemById('crop').get('left');
-        croptop = canvas.getItemById('crop').get('top');
-        cropscalex = canvas.getItemById('crop').get('scaleX');
-        cropscaley = canvas.getItemById('crop').get('scaleY');
-      }
+      updateCropBounds();
       crop(canvas.getItemById('cropped'));
     }
   });
 
   // An object is being rotated in the canvas
   canvas.on('object:rotating', function (e) {
-    if (e.e.shiftKey) {
-      canvas.getActiveObject().snapAngle = 15;
-    } else {
-      canvas.getActiveObject().snapAngle = 0;
+    if (canvas.getActiveObject()) {
+      canvas.getActiveObject().snapAngle = e.e.shiftKey ? 15 : 0;
     }
     e.target.hasControls = false;
   });
@@ -82,8 +128,10 @@ $(document).ready(function () {
   canvas.on('object:modified', function (e) {
     e.target.hasControls = true;
     if (!editinggroup && !cropping) {
-      canvas.getActiveObject().lockMovementX = false;
-      canvas.getActiveObject().lockMovementY = false;
+      if (canvas.getActiveObject()) {
+        canvas.getActiveObject().lockMovementX = false;
+        canvas.getActiveObject().lockMovementY = false;
+      }
       canvas.renderAll();
       if (e.target.type == 'activeSelection') {
         const tempselection = canvas.getActiveObject();
@@ -193,8 +241,12 @@ $(document).ready(function () {
     this.setViewportTransform(this.viewportTransform);
     this.isDragging = false;
     this.selection = true;
-    line_h.opacity = 0;
-    line_v.opacity = 0;
+    if (line_h) {
+      line_h.opacity = 0;
+    }
+    if (line_v) {
+      line_v.opacity = 0;
+    }
   });
 
   // Detect mouse over canvas (for dragging objects from the library)
@@ -214,7 +266,9 @@ $(document).ready(function () {
   canvas.on('mouse:out', function (e) {
     overCanvas = false;
     if (wip) {
-      e.target.hasControls = true;
+      if (e.target) {
+        e.target.hasControls = true;
+      }
       canvas.discardActiveObject();
       wip = false;
       canvas.renderAll();
@@ -320,13 +374,16 @@ $(document).ready(function () {
           }
         }, 1000);
       }
-      // Redo
-      if (e.which === 90 && (e.ctrlKey || e.metaKey) && e.shiftKey) {
-        undoRedo(redo, undo, redoarr, undoarr);
-      }
-      // Undo
+      // Redo / undo (shift decides which; never both in one keypress)
       if (e.which === 90 && (e.ctrlKey || e.metaKey)) {
-        undoRedo(undo, redo, undoarr, redoarr);
+        e.preventDefault();
+        if (e.shiftKey) {
+          if (redo.length >= 1) {
+            undoRedo(redo, undo, redoarr, undoarr);
+          }
+        } else if (undo.length >= 1) {
+          undoRedo(undo, redo, undoarr, redoarr);
+        }
       }
       // Duplicate object
       if (e.which === 68 && (e.ctrlKey || e.metaKey)) {
@@ -353,51 +410,30 @@ $(document).ready(function () {
       if (e.keyCode === 13 && editingproject) {
         saveProjectName();
       }
-      // Left arrow key (move object to the left)
-      if (e.keyCode === 37 && canvas.getActiveObject()) {
-        var obj = canvas.getActiveObject();
-        var step = 2;
+      // Arrow keys nudge the selection
+      if (
+        e.keyCode >= 37 &&
+        e.keyCode <= 40 &&
+        canvas.getActiveObject() &&
+        !canvas.getActiveObject().isEditing &&
+        !focus &&
+        !editinglayer &&
+        !editingproject
+      ) {
+        const obj = canvas.getActiveObject();
         // Bigger step if shift is down
-        if (e.shiftKey) {
-          step = 7;
+        const step = e.shiftKey ? 7 : 2;
+        if (e.keyCode === 37) {
+          obj.left = obj.left - step;
+        } else if (e.keyCode === 38) {
+          obj.top = obj.top - step;
+        } else if (e.keyCode === 39) {
+          obj.left = obj.left + step;
+        } else {
+          obj.top = obj.top + step;
         }
-        obj.left = obj.left - step;
-        canvas.renderAll();
-        autoKeyframe(obj, { action: 'drag' }, false);
-      }
-      // Up arrow key (move object up)
-      if (e.keyCode === 38 && canvas.getActiveObject()) {
-        var obj = canvas.getActiveObject();
-        var step = 2;
-        // Bigger step if shift is down
-        if (e.shiftKey) {
-          step = 7;
-        }
-        obj.top = obj.top - step;
-        canvas.renderAll();
-        autoKeyframe(obj, { action: 'drag' }, false);
-      }
-      // Right arrow key  (move object to the right)
-      if (e.keyCode === 39 && canvas.getActiveObject()) {
-        var obj = canvas.getActiveObject();
-        var step = 2;
-        // Bigger step if shift is down
-        if (e.shiftKey) {
-          step = 7;
-        }
-        obj.left = obj.left + step;
-        canvas.renderAll();
-        autoKeyframe(obj, { action: 'drag' }, false);
-      }
-      // Down arrow key   (move object down)
-      if (e.keyCode === 40 && canvas.getActiveObject()) {
-        var obj = canvas.getActiveObject();
-        var step = 2;
-        // Bigger step if shift is down
-        if (e.shiftKey) {
-          step = 7;
-        }
-        obj.top = obj.top + step;
+        // Without this the selection box stays where the object used to be
+        obj.setCoords();
         canvas.renderAll();
         autoKeyframe(obj, { action: 'drag' }, false);
       }
@@ -406,7 +442,7 @@ $(document).ready(function () {
       if (
         e.keyCode === 221 &&
         canvas.getActiveObjects() &&
-        e.metaKey
+        (e.metaKey || e.ctrlKey)
       ) {
         if (canvas.getActiveObjects().length == 1) {
           var obj = canvas.getActiveObject();
@@ -434,7 +470,7 @@ $(document).ready(function () {
       if (
         e.keyCode === 219 &&
         canvas.getActiveObjects() &&
-        e.metaKey
+        (e.metaKey || e.ctrlKey)
       ) {
         if (canvas.getActiveObjects().length == 1) {
           var obj = canvas.getActiveObject();
@@ -545,25 +581,24 @@ $(document).ready(function () {
 
   // Copy event
   window.addEventListener('copy', function (e) {
+    // Selecting keyframes clears the canvas selection, so there is often no
+    // active object at all here - never dereference it unguarded.
+    const activeObject = canvas.getActiveObject();
+    if (activeObject && activeObject.isEditing) {
+      return;
+    }
     // Copy selected object
-    if (
-      canvas.getActiveObject() &&
-      shiftkeys.length == 0 &&
-      !canvas.getActiveObject().isEditing
-    ) {
+    if (activeObject && shiftkeys.length == 0) {
       var emptyInp = document.getElementById('emptyInput');
       emptyInp.select();
       emptyInp.focus();
       setTimeout(function () {
         document.execCommand('copy');
       }, 0);
-      clipboard = canvas.getActiveObject();
+      clipboard = activeObject;
       cliptype = 'object';
       // Copy selected keyframe(s)
-    } else if (
-      shiftkeys.length > 0 &&
-      !canvas.getActiveObject().isEditing
-    ) {
+    } else if (shiftkeys.length > 0) {
       var emptyInp = document.getElementById('emptyInput');
       emptyInp.select();
       emptyInp.focus();
@@ -580,7 +615,9 @@ $(document).ready(function () {
             e.name == drag.attr('data-property')
           );
         });
-        clipboard.push(keyarr[0]);
+        if (keyarr.length > 0) {
+          clipboard.push(keyarr[0]);
+        }
       });
       cliptype = 'keyframe';
     }
@@ -598,7 +635,9 @@ $(document).ready(function () {
     } else {
       for (var i = 0; i < imgs.length; i++) {
         if (imgs[i].type.indexOf('image') == -1) continue;
-        var imgObj = imgs[i].getAsFile();
+        // `let` so each async thumbnail callback keeps its own file
+        let imgObj = imgs[i].getAsFile();
+        if (!imgObj) continue;
         if (imgObj.size / 1024 / 1024 <= 10) {
           createThumbnail(imgObj, 250).then(function (data) {
             saveFile(
@@ -803,27 +842,7 @@ $(document).ready(function () {
   syncScrollHoz($('#timeline'), $('#seekarea'));
 
   // Initialize layer sorting
-  sortable('#layer-inner-list', {
-    customDragImage: (draggedElement, elementOffset, event) => {
-      return {
-        element: document.getElementById('nothing'),
-        posX: event.pageX - elementOffset.left,
-        posY: event.pageY - elementOffset.top,
-      };
-    },
-  })[0].addEventListener('sortstop', function (e) {
-    const id = $(e.detail.item).attr('data-object');
-    const previd = $(e.detail.item).prev().attr('data-object');
-    if ($('.sortable-dragging').length == 1) {
-      $('.sortable-dragging').remove();
-      if (previd == undefined) {
-        $('#inner-timeline').prepend($('#' + id));
-      } else {
-        $('#' + id).insertAfter($('#' + previd));
-      }
-      orderLayers();
-    }
-  });
+  initLayerSortable();
 
   // Initialize dropdown for keyframe easing
   $('#easing select').niceSelect();
@@ -936,8 +955,8 @@ $(document).ready(function () {
     onmove: function (x) {
       if (canvas.getActiveObject()) {
         var obj = canvas.getActiveObject();
-        if (obj.filters.find((x) => x.type == 'RemoveColor')) {
-          obj.filters.find((x) => x.type == 'RemoveColor').distance =
+        if (obj.filters.find((i) => i.type == 'RemoveColor')) {
+          obj.filters.find((i) => i.type == 'RemoveColor').distance =
             x / 100;
         }
         obj.applyFilters();
@@ -964,8 +983,8 @@ $(document).ready(function () {
     onmove: function (x) {
       if (canvas.getActiveObject()) {
         var obj = canvas.getActiveObject();
-        if (obj.filters.find((x) => x.type == 'Noise')) {
-          obj.filters.find((x) => x.type == 'Noise').noise = x;
+        if (obj.filters.find((i) => i.type == 'Noise')) {
+          obj.filters.find((i) => i.type == 'Noise').noise = x;
         } else {
           obj.filters.push(
             new f.Noise({
@@ -997,8 +1016,8 @@ $(document).ready(function () {
     onmove: function (x) {
       if (canvas.getActiveObject()) {
         var obj = canvas.getActiveObject();
-        if (obj.filters.find((x) => x.type == 'Blur')) {
-          obj.filters.find((x) => x.type == 'Blur').blur = x / 100;
+        if (obj.filters.find((i) => i.type == 'Blur')) {
+          obj.filters.find((i) => i.type == 'Blur').blur = x / 100;
         } else {
           obj.filters.push(
             new f.Blur({
@@ -1006,9 +1025,9 @@ $(document).ready(function () {
             })
           );
         }
+        obj.applyFilters();
+        canvas.renderAll();
       }
-      obj.applyFilters();
-      canvas.renderAll();
     },
     onfinish: function (x) {
       save();

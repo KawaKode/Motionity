@@ -88,15 +88,24 @@ function checkDB() {
       } else {
         loadProject();
       }
+    })
+    .catch(function (e) {
+      console.error('Could not open the local project database', e);
     });
 }
 
 // Automatically save project (locally)
-function autoSave() {
+async function autoSave() {
   if (checkstatus) {
     canvas.clipPath = null;
-    objects.forEach(async function (object) {
+    // Sequential, not forEach(async): toDatalessJSON below must not run
+    // while filters are still being stripped off the objects.
+    for (const object of objects) {
       var obj = canvas.getItemById(object.id);
+      if (!obj) {
+        object.filters = [];
+        continue;
+      }
       if (obj.filters) {
         if (obj.filters.length > 0) {
           object.filters = [];
@@ -174,7 +183,7 @@ function autoSave() {
       } else {
         object.filters = [];
       }
-    });
+    }
     const inst = canvas.toDatalessJSON([
       'volume',
       'audioSrc',
@@ -250,6 +259,9 @@ function autoSave() {
         activepreset: activepreset,
         width: artboard.width,
         height: artboard.height,
+      })
+      .catch(function (e) {
+        console.error('Autosave failed', e);
       });
     objects.forEach(function (object) {
       replaceSource(canvas.getItemById(object.id), canvas);
@@ -289,17 +301,24 @@ function loadProject() {
       currenttime = 0;
       canvas.clipPath = null;
       canvas.clear();
-      fabric.filterBackend = webglBackend;
+      if (webglBackend) {
+        fabric.filterBackend = webglBackend;
+      }
       f = fabric.Image.filters;
       canvas.loadFromJSON(JSON.parse(project.canvas), function () {
         canvas.clipPath = artboard;
-        canvas.getItemById('line_h').set({ opacity: 0 });
-        canvas.getItemById('line_v').set({ opacity: 0 });
+        hideGuides(canvas);
         canvas.renderAll();
         $('.object-props').remove();
         $('.layer').remove();
         objects.forEach(function (object) {
           var animatethis = false;
+          if (!object.animate) {
+            object.animate = [];
+          }
+          if (!canvas.getItemById(object.id)) {
+            return;
+          }
           if (object.animate.length > 5) {
             if (isSameSet(object.animate, props)) {
               animatethis = true;
@@ -331,6 +350,9 @@ function loadProject() {
           }
         });
         keyframes.forEach(function (keyframe) {
+          if (!canvas.getItemById(keyframe.id)) {
+            return;
+          }
           if (
             keyframe.name != 'top' &&
             keyframe.name != 'scaleY' &&
@@ -510,12 +532,18 @@ function deleteAsset(key) {
     .doc({ key: key })
     .get()
     .then((asset) => {
+      if (!asset) {
+        return;
+      }
       var temp = files.filter((x) => x.file == asset.src);
       if (temp.length > 0) {
         temp.forEach(function (file) {
-          deleteObject(canvas.getItemById(file.name));
+          const object = canvas.getItemById(file.name);
+          if (object) {
+            deleteObject(object);
+          }
           files = $.grep(files, function (a) {
-            return a != file;
+            return a !== file;
           });
         });
       }
@@ -534,14 +562,26 @@ function deleteAsset(key) {
     });
 }
 
-function getAssets() {
+function getAssets(attempt) {
+  attempt = attempt || 0;
   db.collection('assets')
     .get()
     .then((assets) => {
-      // Sometimes the assets aren't ready when importing, really annoying
+      // Sometimes the assets aren't ready when importing, really annoying.
+      // Retry on a timer with a hard cap - a bare synchronous re-call spins
+      // the CPU forever when the collection never resolves.
       if (assets === undefined) {
-        getAssets();
+        if (attempt < 20) {
+          window.setTimeout(function () {
+            getAssets(attempt + 1);
+          }, 250);
+        } else {
+          console.error('Could not read assets from the local database');
+        }
       } else if (assets.length > 0) {
+        // Rebuild rather than append: getAssets() runs again after an import
+        uploaded_images = [];
+        uploaded_videos = [];
         assets.forEach(function (asset) {
           if (asset.type == 'image') {
             uploaded_images.push({
@@ -562,6 +602,9 @@ function getAssets() {
           }
         });
       }
+    })
+    .catch(function (e) {
+      console.error('Could not read assets', e);
     });
 }
 
@@ -570,9 +613,19 @@ function readTextFile(file, callback) {
   rawFile.overrideMimeType('application/json');
   rawFile.open('GET', file, true);
   rawFile.onreadystatechange = function () {
-    if (rawFile.readyState === 4 && rawFile.status == '200') {
-      callback(rawFile.responseText);
+    if (rawFile.readyState === 4) {
+      // A blob: URL resolves with status 0
+      if (rawFile.status == 200 || rawFile.status === 0) {
+        callback(rawFile.responseText);
+      } else {
+        alert('Could not read the file');
+        $('#import-project span').html('Import');
+      }
     }
+  };
+  rawFile.onerror = function () {
+    alert('Could not read the file');
+    $('#import-project span').html('Import');
   };
   rawFile.send(null);
 }
@@ -582,10 +635,20 @@ async function importProject(e) {
   var file = e.target.files[0];
   var path = (window.URL || window.webkitURL).createObjectURL(file);
   readTextFile(path, function (text) {
-    var data = JSON.parse(text);
+    var data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      data = null;
+    }
+    if (!data || !Array.isArray(data.project) || data.project.length == 0) {
+      alert('Wrong file type');
+      $('#import-project span').html('Import');
+      return;
+    }
     delete data.project[0].id;
-    if (data.project.length > 0) {
-      if (data.assets.length > 0) {
+    {
+      if (Array.isArray(data.assets) && data.assets.length > 0) {
         data.assets.forEach(function (asset) {
           delete asset.id;
           db.collection('assets').add(asset);
@@ -598,10 +661,14 @@ async function importProject(e) {
           $('#import-project span').html('Import');
           hideModals();
           loadProject();
+        })
+        .catch(function (e) {
+          console.error('Import failed', e);
+          alert('Import failed');
+          $('#import-project span').html('Import');
         });
-    } else {
-      alert('Wrong file type');
     }
+    window.URL.revokeObjectURL(path);
   });
 }
 
@@ -619,18 +686,24 @@ function exportProject() {
           .get()
           .then((assets) => {
             var exportarr = { project: project, assets: assets };
-            $('<a />', {
-              download: 'data.json',
-              href:
-                'data:application/json,' +
-                encodeURIComponent(JSON.stringify(exportarr)),
-            })
-              .appendTo('body')
-              .click(function () {
-                $(this).remove();
-                $('#export-project span').html('Export');
-              })[0]
-              .click();
+            // Blob, not a data: URL - projects with media blow past the
+            // maximum URL length.
+            const url = URL.createObjectURL(
+              new Blob([JSON.stringify(exportarr)], {
+                type: 'application/json',
+              })
+            );
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'data.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.setTimeout(function () {
+              URL.revokeObjectURL(url);
+            }, 60000);
+            $('#export-project span').html('Export');
           });
       } else {
         alert('Empty project');
@@ -649,11 +722,16 @@ function clearProject() {
       'Are you sure you want to clear this project? This action cannot be undone.'
     )
   ) {
-    db.collection('projects').delete();
-    db.collection('assets').delete();
-    window.setTimeout(function () {
-      location.reload();
-    }, 1000);
+    Promise.all([
+      db.collection('projects').delete(),
+      db.collection('assets').delete(),
+    ])
+      .catch(function (e) {
+        console.error('Could not clear the project', e);
+      })
+      .then(function () {
+        location.reload();
+      });
   }
   hideMore();
 }
