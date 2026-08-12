@@ -1,7 +1,30 @@
-var workerPath =
-  'https://archive.org/download/ffmpeg_asm/ffmpeg_asm.js';
+// MP4/GIF export transcodes the captured WebM with an asm.js build of ffmpeg.
+// Packaged builds ship it locally (npm run vendor); a plain checkout falls back
+// to the public mirror, which needs network access.
+var FFMPEG_ASM_LOCAL = 'vendor/ffmpeg_asm.js';
+var FFMPEG_ASM_REMOTE = 'https://archive.org/download/ffmpeg_asm/ffmpeg_asm.js';
+var ffmpegAsmUrlPromise = null;
 
-function processInWebWorker() {
+// The worker is built from a blob, so importScripts() needs an absolute URL.
+function resolveFfmpegAsmUrl() {
+  if (!ffmpegAsmUrlPromise) {
+    ffmpegAsmUrlPromise = fetch(FFMPEG_ASM_LOCAL, { method: 'HEAD' })
+      .then(function (res) {
+        // A catch-all/SPA route answers 200 with HTML; that is not the script.
+        var type = res.headers.get('content-type') || '';
+        var local = res.ok && type.indexOf('text/html') === -1;
+        return local
+          ? new URL(FFMPEG_ASM_LOCAL, location.href).href
+          : FFMPEG_ASM_REMOTE;
+      })
+      .catch(function () {
+        return FFMPEG_ASM_REMOTE;
+      });
+  }
+  return ffmpegAsmUrlPromise;
+}
+
+function processInWebWorker(workerPath) {
   var blob = URL.createObjectURL(
     new Blob(
       [
@@ -21,37 +44,62 @@ function processInWebWorker() {
 }
 
 var worker;
+// The worker is created once and reused, so its "ready" handshake only ever
+// arrives for the first conversion. Remember it across calls.
+var workerIsReady = false;
 
-function convertStreams(videoBlob, setting) {
+async function convertStreams(videoBlob, setting) {
   var aab;
-  var buffersReady;
-  var workerReady;
-  var posted;
+  var buffersReady = false;
+  var posted = false;
+
+  function convertFailed(reason) {
+    console.error('Conversion failed: ' + reason);
+    alert(
+      'Sorry, the ' +
+        setting.toUpperCase() +
+        ' conversion failed. The WEBM format is always available.'
+    );
+    resetRecordingUI();
+  }
 
   var fileReader = new FileReader();
   fileReader.onload = function () {
     aab = this.result;
-    postMessage();
+    buffersReady = true;
+    if (workerIsReady) postMessage();
+  };
+  fileReader.onerror = function () {
+    convertFailed('could not read the recorded video');
   };
   fileReader.readAsArrayBuffer(videoBlob);
 
   if (!worker) {
-    worker = processInWebWorker();
+    // Safe to await here: workerIsReady is still false, so the FileReader
+    // callback cannot post a command before the worker exists.
+    worker = processInWebWorker(await resolveFfmpegAsmUrl());
   }
+  worker.onerror = function (e) {
+    convertFailed(e.message || 'worker error');
+  };
   worker.onmessage = function (event) {
     var message = event.data;
     if (message.type == 'ready') {
-      workerReady = true;
+      workerIsReady = true;
       if (buffersReady) postMessage();
     } else if (message.type == 'done') {
-      var result = message.data[0];
+      var result = message.data && message.data[0];
+      if (!result || !result.data) {
+        convertFailed('the encoder returned no data');
+        return;
+      }
       if (setting == 'gif') {
-        var blob = new File([result.data], 'test.gif', {
+        var blob = new File([result.data], 'video.gif', {
           type: 'image/gif',
         });
         PostBlob(blob);
       } else if (setting == 'mp4') {
-        var blob = new File([result.data], 'test.mp4', {
+        var blob = new File([result.data], 'video.mp4', {
           type: 'video/mp4',
         });
         PostBlob(blob);
@@ -59,11 +107,17 @@ function convertStreams(videoBlob, setting) {
     }
   };
   var postMessage = function () {
+    if (posted) return;
     posted = true;
+    // The recording was made at this rate, so the transcode has to keep it:
+    // a fixed -r would duplicate or drop frames and drift the timing.
+    const fps = getExportFramerate();
     if (setting == 'gif') {
       worker.postMessage({
         type: 'command',
-        arguments: '-i video.webm -r 24 output-10.gif'.split(' '),
+        arguments: ('-i video.webm -r ' + fps + ' output-10.gif').split(
+          ' '
+        ),
         files: [
           {
             data: new Uint8Array(aab),
@@ -74,10 +128,11 @@ function convertStreams(videoBlob, setting) {
     } else if (setting == 'mp4') {
       worker.postMessage({
         type: 'command',
-        arguments:
-          '-i video.webm -c:v mpeg4 -b:v 6400k -strict experimental output.mp4'.split(
-            ' '
-          ),
+        arguments: (
+          '-i video.webm -c:v mpeg4 -b:v 6400k -r ' +
+          fps +
+          ' -strict experimental output.mp4'
+        ).split(' '),
         files: [
           {
             data: new Uint8Array(aab),
@@ -97,22 +152,9 @@ function PostBlob(blob) {
   a.download = blob.name || 'video';
   document.body.appendChild(a);
   a.click();
-  recording = false;
-  currenttime = 0;
-  animate(false, 0);
-  $('#seekbar').offset({
-    left:
-      offset_left +
-      $('#inner-timeline').offset().left +
-      currenttime / timelinetime,
-  });
-  canvas.renderAll();
-  resizeCanvas();
-  if (background_audio != false) {
-    background_audio.pause();
-    background_audio = new Audio(background_audio.src);
-  }
-  $('#download-real').html('Download');
-  $('#download-real').removeClass('downloading');
-  updateRecordCanvas();
+  document.body.removeChild(a);
+  window.setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 60000);
+  resetRecordingUI();
 }

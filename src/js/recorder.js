@@ -1,68 +1,108 @@
-const FPS = 30;
-let frame = 0;
-var chunks = [];
-var stream;
-var rec;
-var track;
+// Everything the current export needs to tear down when it finishes
+var exportAudio = null;
 
-function timeout(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Route every sound source of the project into a single destination node.
+//
+// This has to be one shared AudioContext with one destination:
+//   - MediaRecorder only records the first audio track of a stream, so
+//     adding one track per source silently dropped all but one of them,
+//   - a context per source was never closed, and browsers cap how many a
+//     page may hold.
+function buildExportAudio(stream) {
+  const ctx = new AudioContext();
+  const destination = ctx.createMediaStreamDestination();
+  const elements = [];
+  var connected = false;
 
-function initRecorder() {
-  stream = document.getElementById('canvasrecord').captureStream(0);
-  track = stream.getVideoTracks()[0];
-
-  if (!track.requestFrame) {
-    track.requestFrame = () => stream.requestFrame();
+  function connect(element) {
+    try {
+      ctx.createMediaElementSource(element).connect(destination);
+      connected = true;
+      return true;
+    } catch (e) {
+      // Already bound to another context, or tainted by CORS
+      console.warn('Could not route audio for export', e);
+      return false;
+    }
   }
 
-  rec = new MediaRecorder(stream, {
-    bitsPerSecond: 3200000,
+  objects.forEach(function (object) {
+    const obj = canvasrecord.getItemById(object.id);
+    const p_keyframe = p_keyframes.find((x) => x.id == object.id);
+    if (!obj || !p_keyframe) {
+      return;
+    }
+    if (obj.get('assetType') == 'video') {
+      const element = $(obj.getElement())[0];
+      if (element) {
+        connect(element);
+      }
+    } else if (
+      obj.get('assetType') == 'audio' &&
+      obj.get('audioSrc')
+    ) {
+      // Audio layers used to be left out of the export entirely
+      const element = new Audio(obj.get('audioSrc'));
+      element.crossOrigin = 'anonymous';
+      element.volume = obj.get('volume');
+      if (connect(element)) {
+        elements.push({
+          element: element,
+          start: p_keyframe.start,
+          end: p_keyframe.end,
+          trimstart: p_keyframe.trimstart,
+        });
+      }
+    }
   });
 
-  rec.ondataavailable = function (evt) {
-    console.log('chunky');
-    chunks.push(evt.data);
-  };
+  if (background_audio != false && connect(background_audio)) {
+    elements.push({
+      element: background_audio,
+      start: 0,
+      end: duration,
+      trimstart: 0,
+    });
+  }
 
-  rec.start();
-
-  console.log('Recorder has been started');
-
-  rec.onstart = function () {
-    rec.pause();
-    console.log('start!');
-  };
+  if (connected) {
+    stream.addTrack(destination.stream.getAudioTracks()[0]);
+  }
+  return { context: ctx, elements: elements, timers: [] };
 }
 
-async function recordFrame() {
-  console.log(frame);
-
-  waitForEvent(rec, 'pause');
-
-  //rec.onpause = async function(e) {
-
-  // wake up the recorder
-  rec.resume();
-  recordAnimate(false, (frame / FPS) * 1000);
-  //animate(false, (frame/FPS)*1000)
-  // force write the frame
-  track.requestFrame();
-
-  // wait until our frame-time elapsed
-  await timeout(1000 / FPS);
-
-  // sleep recorder
-  rec.pause();
-  //}
+// Start the scheduled audio layers relative to the start of the recording
+function startExportAudio(audio) {
+  if (!audio) {
+    return;
+  }
+  audio.elements.forEach(function (item) {
+    item.element.currentTime = item.trimstart / 1000;
+    audio.timers.push(
+      window.setTimeout(function () {
+        item.element.play();
+      }, Math.max(0, item.start))
+    );
+    audio.timers.push(
+      window.setTimeout(function () {
+        item.element.pause();
+      }, Math.max(0, item.end))
+    );
+  });
 }
 
-async function exportRecording() {
-  rec.stop();
-  stream.getTracks().forEach((track) => track.stop());
-  await waitForEvent(rec, 'stop');
-  return new Blob(chunks);
+function stopExportAudio(audio) {
+  if (!audio) {
+    return;
+  }
+  audio.timers.forEach(window.clearTimeout);
+  audio.timers = [];
+  audio.elements.forEach(function (item) {
+    item.element.pause();
+  });
+  if (audio.context && audio.context.state != 'closed') {
+    audio.context.close();
+  }
 }
 
 // Record canvas
@@ -85,280 +125,122 @@ async function record() {
     document.body.removeChild(link);
     recording = false;
     updateRecordCanvas();
-  } else {
-    if (!recording) {
-      recording = true;
-      paused = true;
-      await recordAnimate(0);
-      $('#download-real').html('Rendering...');
-      $('#download-real').addClass('downloading');
-      var fps = 60;
-      var aCtx = new AudioContext();
-      function audioTimerLoop(callback, frequency) {
-        var freq = frequency / 1000;
-        var silence = aCtx.createGain();
-        silence.gain.value = 0;
-        silence.connect(aCtx.destination);
-        onOSCend();
-        var stopped = false;
-        function onOSCend() {
-          osc = aCtx.createOscillator();
-          osc.onended = onOSCend;
-          osc.connect(silence);
-          osc.start(0);
-          osc.stop(aCtx.currentTime + freq);
-          callback(aCtx.currentTime);
-          if (stopped) {
-            osc.onended = function () {
-              return;
-            };
-          }
-        }
-        return function () {
-          stopped = true;
-        };
-      }
-      var stopAnim = audioTimerLoop(renderAnim, 1000 / fps);
-      var stream = document
-        .getElementById('canvasrecord')
-        .captureStream(fps);
-      objects.forEach(function (object) {
-        if (
-          canvasrecord.getItemById(object.id).get('assetType') &&
-          canvasrecord.getItemById(object.id).get('assetType') ==
-            'video'
-        ) {
-          var audio = $(
-            canvasrecord.getItemById(object.id).getElement()
-          )[0];
-          var audioContext = new AudioContext();
-          var audioSource =
-            audioContext.createMediaElementSource(audio);
-          var audioDestination =
-            audioContext.createMediaStreamDestination();
-          audioSource.connect(audioDestination);
-          stream.addTrack(
-            audioDestination.stream.getAudioTracks()[0]
-          );
-        }
-      });
-      if (background_audio != false) {
-        var audioContext = new AudioContext();
-        var audioSource =
-          audioContext.createMediaElementSource(background_audio);
-        var audioDestination =
-          audioContext.createMediaStreamDestination();
-        audioSource.connect(audioDestination);
-        stream.addTrack(audioDestination.stream.getAudioTracks()[0]);
-        background_audio.currentTime = 0;
-        background_audio.play();
-      }
-      let chunks = [];
-      var recorder = new MediaRecorder(stream, {
-        bitsPerSecond: 3200000,
-      });
-      recorder.ondataavailable = (e) => chunks.push(e.data);
-      recorder.onstop = (e) => {
-        stopAnim();
-        downloadRecording(chunks);
-        animate(false, 0);
-        $('#seekbar').offset({
-          left:
-            offset_left +
-            $('#inner-timeline').offset().left +
-            currenttime / timelinetime,
-        });
-        canvas.renderAll();
-        console.log('Finished rendering');
-      };
-      recorder.start();
-
-      setTimeout(function () {
-        recorder.stop();
-      }, duration);
-
-      async function renderAnim(time) {
-        await recordAnimate(time * 1000);
-      }
-    }
+    return;
   }
+  if (recording) {
+    return;
+  }
+
+  recording = true;
+  paused = true;
+  await recordAnimate(0);
+  $('#download-real').html('Rendering...');
+  $('#download-real').addClass('downloading');
+
+  // Preferred path: render every frame offline, with no clock attached, so
+  // nothing is dropped and video layers land on the exact frame.
+  if (frameAccurateSupported()) {
+    const blob = await renderFrameAccurate();
+    if (blob) {
+      deliverRecording(blob);
+      return;
+    }
+    console.warn('Falling back to the real-time encoder');
+    $('#download-real').html('Rendering...');
+    await updateRecordCanvas();
+    await recordAnimate(0);
+  }
+
+  const fps = getExportFramerate();
+  const aCtx = new AudioContext();
+
+  // requestAnimationFrame is throttled in background tabs, an oscillator is
+  // not, so the render keeps running while the tab is hidden.
+  function audioTimerLoop(callback, frequency) {
+    const freq = frequency / 1000;
+    const silence = aCtx.createGain();
+    silence.gain.value = 0;
+    silence.connect(aCtx.destination);
+    var stopped = false;
+    var osc;
+    function onOSCend() {
+      if (stopped) {
+        return;
+      }
+      osc = aCtx.createOscillator();
+      osc.onended = onOSCend;
+      osc.connect(silence);
+      osc.start(0);
+      osc.stop(aCtx.currentTime + freq);
+      callback(aCtx.currentTime);
+    }
+    onOSCend();
+    return function () {
+      stopped = true;
+      if (osc) {
+        osc.onended = null;
+      }
+    };
+  }
+
+  const stream = document
+    .getElementById('canvasrecord')
+    .captureStream(fps);
+  exportAudio = buildExportAudio(stream);
+
+  const chunks = [];
+  const recorder = new MediaRecorder(stream, {
+    bitsPerSecond: 3200000,
+  });
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.onerror = (e) => {
+    console.error('Recording failed', e);
+    stopAnim();
+    stopExportAudio(exportAudio);
+    exportAudio = null;
+    aCtx.close();
+    resetRecordingUI();
+  };
+  recorder.onstop = () => {
+    stopAnim();
+    stopExportAudio(exportAudio);
+    exportAudio = null;
+    stream.getTracks().forEach((track) => track.stop());
+    aCtx.close();
+    downloadRecording(chunks);
+    console.log('Finished rendering');
+  };
+
+  // The capture is real time, so the animation clock is driven off the audio
+  // clock and the recording is stopped once it has covered the timeline.
+  var origin = null;
+  var stopping = false;
+  async function renderAnim(time) {
+    if (origin === null) {
+      origin = time;
+    }
+    const elapsed = (time - origin) * 1000;
+    if (elapsed >= duration) {
+      if (!stopping) {
+        stopping = true;
+        await recordAnimate(duration);
+        if (recorder.state != 'inactive') {
+          recorder.stop();
+        }
+      }
+      return;
+    }
+    await recordAnimate(elapsed);
+  }
+
+  recorder.start();
+  startExportAudio(exportAudio);
+  var stopAnim = audioTimerLoop(renderAnim, 1000 / fps);
+
+  // Safety net: never leave the UI stuck if the oscillator clock stalls
+  window.setTimeout(function () {
+    if (recorder.state != 'inactive') {
+      recorder.stop();
+    }
+  }, duration + 5000);
 }
-
-/*
-
-			initRecorder();
-
-			//await timeout(2000)
-		
-			// draw one frame at a time
-			while (frame++ < FPS * (duration/1000)) {
-				await longDraw(); // do the long drawing
-				await recordFrame(); // record at constant FPS 
-			}
-			// now all the frames have been drawn
-			const recorded = await exportRecording(); // we can get our final video file
-			const a = document.createElement('a');
-			a.style.display = 'none';
-			a.href =  URL.createObjectURL(recorded);
-			a.download = "test.webm";
-			document.body.appendChild(a);
-			a.click();
-			recording = false;
-			currenttime = 0;
-			animate(false, 0);
-			$("#seekbar").offset({left:offset_left+$("#inner-timeline").offset().left+(currenttime/timelinetime)});
-			canvas.renderAll();
-				resizeCanvas();
-				if (background_audio != false) {
-						background_audio.pause();
-						background_audio = new Audio(background_audio.src)
-				}
-			$("#download-real").html("Download");
-			$("#download-real").removeClass("downloading");
-			updateRecordCanvas();
-		
-			// Fake long drawing operations that make real-time recording impossible
-			function longDraw() {
-				recordAnimate((frame/FPS)*1000)
-				return wait(Math.random() * 300)
-					.then(recordAnimate((frame/FPS)*1000));
-			}*/
-
-/*
-paused = true;
-			recording = true;
-			$("#download-real").html("Rendering...");
-			$("#download-real").addClass("downloading");
-			var fps = 60;
-			var aCtx = new AudioContext();
-			function audioTimerLoop(callback, frequency) {
-					var freq = frequency / 1000;
-					var silence = aCtx.createGain();
-					silence.gain.value = 0;
-					silence.connect(aCtx.destination);
-					onOSCend();
-					var stopped = false;
-					function onOSCend() {
-							osc = aCtx.createOscillator();
-							osc.onended = onOSCend;
-							osc.connect(silence);
-							osc.start(0);
-							osc.stop(aCtx.currentTime + freq);
-							callback(aCtx.currentTime);
-							if (stopped) {
-									osc.onended = function() {
-											return;
-									};
-							}
-					};
-					return function() {
-					stopped = true;
-					};
-			}
-			var stopAnim = audioTimerLoop(renderAnim, 1000/(fps));
-			var stream = document.getElementById("canvasrecord").captureStream(fps);
-			objects.forEach(function(object){
-					if (canvasrecord.getItemById(object.id).get("assetType") && canvasrecord.getItemById(object.id).get("assetType") == "video") {
-							var audio = $(canvasrecord.getItemById(object.id).getElement())[0];
-							var audioContext = new AudioContext();
-							var audioSource = audioContext.createMediaElementSource(audio);
-							var audioDestination = audioContext.createMediaStreamDestination();
-							audioSource.connect(audioDestination);
-							stream.addTrack(audioDestination.stream.getAudioTracks()[0]);
-					}
-			})
-			if (background_audio != false) {
-					var audioContext = new AudioContext();
-					var audioSource = audioContext.createMediaElementSource(background_audio);
-					var audioDestination = audioContext.createMediaStreamDestination();
-					audioSource.connect(audioDestination);
-					stream.addTrack(audioDestination.stream.getAudioTracks()[0]);
-					background_audio.currentTime = 0;
-					background_audio.play();
-			}
-			let chunks = [];
-			var recorder = new MediaRecorder(stream, {
-				bitsPerSecond : 3200000,
-			});
-			recorder.ondataavailable = e => chunks.push(e.data);
-			recorder.onstop = e => {
-					stopAnim();
-					downloadRecording(chunks);
-					animate(false, 0);
-					$("#seekbar").offset({left:offset_left+$("#inner-timeline").offset().left+(currenttime/timelinetime)});
-					canvas.renderAll();
-					console.log("Finished rendering")
-			}
-			recorder.start();
-
-			setTimeout(function() {
-					recorder.stop();
-			}, duration)
-
-			async function renderAnim(time) {
-					await animate(false, time*1000);
-			} 
-
-*/
-
-/*
-$("#download-real").html("Rendering...");
-			$("#download-real").addClass("downloading");
-		
-			// browser check
-			if (typeof MediaStreamTrackGenerator === undefined || typeof MediaStream === undefined || typeof VideoFrame === undefined) {
-				console.log('Your browser does not support the web APIs used in this demo');
-				return;
-			}
-		
-			// recording setup
-			const fps = 60;
-			const generator = new MediaStreamTrackGenerator({ kind: "video" });
-			const writer = generator.writable.getWriter();
-			const stream = new MediaStream();
-			stream.addTrack(generator);
-			const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-			recorder.start();
-
-			function timeout(ms) {
-				return new Promise(resolve => setTimeout(resolve, ms));
-		}
-		
-			// animate stuff
-			console.log('rendering...')
-			console.log(duration);
-			for (let i = 0; i < (duration/1000)*fps; i++) {
-				animate(false, (i/fps)*1000);
-				const frame = new VideoFrame(document.getElementById("canvasrecord"), { 
-					timestamp: (i / fps)*1000
-				});
-				await writer.write(frame);
-				await timeout(100)
-				console.log("frame "+(i/fps)*1000);
-			}
-			console.log('rendering done');
-		
-			// stop recording and 
-			recorder.addEventListener("dataavailable", (evt) => {
-				const a = document.createElement('a');
-				a.style.display = 'none';
-				a.href =  URL.createObjectURL(evt.data);
-				a.download = "test.webm";
-				document.body.appendChild(a);
-				a.click();
-				recording = false;
-				currenttime = 0;
-				animate(false, 0);
-				$("#seekbar").offset({left:offset_left+$("#inner-timeline").offset().left+(currenttime/timelinetime)});
-				canvas.renderAll();
-					resizeCanvas();
-					if (background_audio != false) {
-							background_audio.pause();
-							background_audio = new Audio(background_audio.src)
-					}
-				$("#download-real").html("Download");
-				$("#download-real").removeClass("downloading");
-				updateRecordCanvas();
-			});
-			recorder.stop();
-			*/

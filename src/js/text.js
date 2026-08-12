@@ -1,10 +1,16 @@
 function animateText(group, ms, play, props, cv, id) {
-  var starttime = p_keyframes.find((x) => x.id == id).start;
-  ms -= starttime;
+  const p_keyframe = p_keyframes.find((x) => x.id == id);
+  if (!group || !p_keyframe) {
+    return;
+  }
+  ms -= p_keyframe.start;
   var length = group._objects.length;
   var globaldelay = 0;
+  // Every letter needs its own binding: the anime callbacks below run long
+  // after the loop has finished, so `var` would make them all share the last
+  // letter's state.
   for (var i = 0; i < length; i++) {
-    var index = i;
+    let index = i;
     if (props.order == 'backward') {
       index = length - i - 1;
     }
@@ -12,9 +18,10 @@ function animateText(group, ms, play, props, cv, id) {
     let top = group.item(index).defaultTop;
     let scaleX = group.item(index).defaultScaleX;
     let scaleY = group.item(index).defaultScaleY;
-    var delay = i * duration;
-    var duration = props.duration / length;
-    var animation = {
+    // Named `step` so it does not shadow the global project duration
+    let step = props.duration / length;
+    let delay = i * step;
+    let animation = {
       opacity: 0,
       top: top,
       left: left,
@@ -22,7 +29,7 @@ function animateText(group, ms, play, props, cv, id) {
       scaleY: scaleY,
     };
     if (props.typeAnim == 'letter') {
-      delay = i * duration - 100;
+      delay = i * step - 100;
     } else if (props.typeAnim == 'word') {
       if (group.item(index).text == ' ') {
         globaldelay += 500;
@@ -30,8 +37,8 @@ function animateText(group, ms, play, props, cv, id) {
       delay = globaldelay;
     }
     if (props.preset == 'typewriter') {
-      delay = i * duration;
-      duration = 20;
+      delay = i * step;
+      step = 20;
     } else if (props.preset == 'fade in') {
     } else if (props.preset == 'slide top') {
       animation.top += 20;
@@ -48,14 +55,14 @@ function animateText(group, ms, play, props, cv, id) {
       animation.scaleX = 1.5;
       animation.scaleY = 1.5;
     }
-    if (delay < 0) {
+    if (!(delay > 0)) {
       delay = 0;
     }
-    if (duration < 20) {
-      duration = 20;
+    if (!(step > 20)) {
+      step = 20;
     }
-    var start = false;
-    var instance = anime({
+    let start = false;
+    let instance = anime({
       targets: animation,
       delay: delay,
       opacity: 1,
@@ -63,7 +70,7 @@ function animateText(group, ms, play, props, cv, id) {
       top: top,
       scaleX: scaleX,
       scaleY: scaleY,
-      duration: duration,
+      duration: step,
       easing: props.easing,
       autoplay: play,
       update: function () {
@@ -228,8 +235,7 @@ class AnimatedText {
     var obj = cv.getItemById(this.id);
     var left = obj.left;
     var top = obj.top;
-    var scaleX = obj,
-      scaleX;
+    var scaleX = obj.scaleX;
     var scaleY = obj.scaleY;
     var angle = obj.angle;
     var start = p_keyframes.find((x) => x.id == this.id).start;
@@ -260,10 +266,16 @@ class AnimatedText {
       cv,
       this.id
     );
-    animate(currenttime, false);
+    animate(false, currenttime);
     save();
   }
   assignTo(id, text, props) {
     this.id = id;
+    if (text !== undefined) {
+      this.text = text;
+    }
+    if (props !== undefined) {
+      this.props = props;
+    }
   }
 }

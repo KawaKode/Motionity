@@ -78,6 +78,20 @@ function initLines() {
   canvas.add(line_v);
 }
 
+// Hide the alignment guides after a canvas reload.
+// They can be missing entirely in projects saved before they existed, so
+// never dereference them directly.
+function hideGuides(inst) {
+  const h = inst.getItemById('line_h');
+  const v = inst.getItemById('line_v');
+  if (h) {
+    h.set({ opacity: 0 });
+  }
+  if (v) {
+    v.set({ opacity: 0 });
+  }
+}
+
 function alignControls(object, type) {
   if (type == 'align-top') {
     object.set(
@@ -122,8 +136,10 @@ function alignControls(object, type) {
 function alignObject() {
   const type = $(this).attr('id');
   const object = canvas.getActiveObject();
-  console.log(canvas.getActiveObject().type);
-  if (canvas.getActiveObject().type == 'activeSelection') {
+  if (!object) {
+    return;
+  }
+  if (object.type == 'activeSelection') {
     const tempselection = canvas.getActiveObject();
     canvas.discardActiveObject();
     tempselection._objects.forEach(function (object) {
@@ -157,6 +173,8 @@ function alignObject() {
     );
     newKeyframe('top', object, currenttime, object.get('top'), true);
   }
+  canvas.renderAll();
+  save();
 }
 $(document).on('click', '.align', alignObject);
 
@@ -240,7 +258,12 @@ function centerLines(e) {
           canvas.renderAll();
         }
       }
-      if (obj != e.target && obj != line_h && obj != line_v) {
+      if (
+        obj != e.target &&
+        obj != line_h &&
+        obj != line_v &&
+        obj.visible !== false
+      ) {
         if (
           obj.get('id') == 'center_h' ||
           obj.get('id') == 'center_v'
