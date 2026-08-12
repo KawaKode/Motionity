@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Web-based motion graphics editor with keyframing, masking, filters and text animations",
   "license": "MIT",
+  "author": "Kawa",
   "main": "electron/main.js",
   "private": true,
   "scripts": {
