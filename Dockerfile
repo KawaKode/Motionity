@@ -6,13 +6,19 @@
 # Build:  docker build -t motionity:latest .
 # Run:    docker run --rm -p 8080:8080 motionity:latest
 #
-# WITH_FFMPEG=0 drops the 18.5 MB asm.js ffmpeg build from the image. MP4/GIF
-# export then downloads it from archive.org on first use instead of working
-# offline; everything else is unaffected.
+# WITH_FFMPEG=0 drops the 23 MB ffmpeg.wasm core from the image and disables
+# MP4/GIF export, which then reports itself as unavailable. It no longer falls
+# back to downloading the encoder at run time: the old asm.js build came from a
+# public archive.org mirror with no integrity check. Everything else, WEBM
+# export included, is unaffected.
 
 FROM node:22-alpine AS vendor
 ARG WITH_FFMPEG=1
 WORKDIR /app
+# ffmpeg.wasm is a runtime dependency, so --omit=dev pulls it in without
+# dragging electron and electron-builder (~400 MB) into the build.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY scripts/vendor.mjs scripts/
 COPY src/index.html src/
 RUN if [ "$WITH_FFMPEG" = "1" ]; then \

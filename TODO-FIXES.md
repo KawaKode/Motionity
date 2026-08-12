@@ -255,9 +255,53 @@ inspection.
 - **`src/js/encode-worker.js`** is still unreferenced. It was the old
   File-System-Access-API sketch; `render.js` supersedes it and buffers to memory
   instead of requiring a save-file picker. Deleting it is a product decision.
-- **MP4 and GIF** still go through the ancient asm.js ffmpeg worker
-  (`converter.js`, loaded from archive.org). The frame-accurate renderer feeds it
-  a better WebM, but that dependency is unchanged and may be offline.
+- **MP4 and GIF** go through ffmpeg.wasm (`converter.js`), vendored out of
+  `node_modules` and pinned by `package-lock.json`. This replaced the asm.js
+  worker loaded from archive.org, which had no integrity check and needed the
+  network. See "ffmpeg.wasm migration" below.
+
+---
+
+# ffmpeg.wasm migration (new)
+
+MP4/GIF export used to `importScripts()` an 18.5 MB asm.js ffmpeg build from
+`https://archive.org/download/ffmpeg_asm/ffmpeg_asm.js` — no integrity check, no
+pinning, and executed in the page. `scripts/vendor.mjs` now **copies**
+ffmpeg.wasm out of `node_modules`, where `package-lock.json` pins it by hash.
+There is no CDN fallback left anywhere in the app.
+
+Three things this ran into, all of which cost a debugging round:
+
+- **`@ffmpeg/core` needs `SharedArrayBuffer`.** The default core is built with
+  pthreads, which requires COOP/COEP cross-origin isolation, which would break
+  the Pixabay, Unsplash and Google Fonts requests. `@ffmpeg/core-st` — the
+  single-threaded build — is used instead. Verified: the core loads with
+  `crossOriginIsolated === false` and `SharedArrayBuffer` undefined.
+- **`mainName: 'main'` is mandatory with that core.** The loader defaults to
+  `proxy_main`, which only the multi-threaded build exports. Without it, `load()`
+  compiles all 23 MB and then aborts with *Cannot call unknown function
+  proxy_main*.
+- **One conversion per load.** The single-threaded core's `main` calls `exit()`,
+  so a second `run()` on the same instance dies with *Program terminated with
+  exit(0)*. `convertStreams` therefore builds and tears down an instance per
+  conversion — measured at ~110 ms, and it returns the 23 MB heap in between.
+  The teardown also runs on failure: an interrupted run otherwise leaves the
+  loader's internal "running" flag set and every later conversion fails with
+  *can only run one command at a time* until the page is reloaded.
+
+MP4 now encodes with `libx264 -crf 23 -pix_fmt yuv420p` plus AAC audio rather
+than `mpeg4 -b:v 6400k`. Same core, better quality per byte, and `yuv420p` is
+what makes it play in Safari and QuickTime.
+
+`WITH_FFMPEG=0` no longer means "download it at run time" — it means MP4/GIF
+export is unavailable, and `converter.js` says so instead of failing obscurely.
+
+Verified in Chromium against a real MediaRecorder WebM: MP4 24 KB with an
+`ftypisom` header that decodes to 320x240 / 2.00 s, GIF 138 KB with a `GIF89a`
+header, the two run back to back, and the missing-core path produces the right
+message.
+
+---
 
 ## Not verified
 

@@ -22,6 +22,10 @@
     "release": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -PublishRelease",
     "test": "node --test \"test/**/*.test.js\""
   },
+  "dependencies": {
+    "@ffmpeg/core-st": "^0.11.1",
+    "@ffmpeg/ffmpeg": "^0.11.6"
+  },
   "devDependencies": {
     "electron": "^40.0.0",
     "electron-builder": "^26.0.0"
@@ -38,12 +42,23 @@
       "electron/**/*",
       "scripts/server.cjs",
       "src/**/*",
-      "!src/**/*.map"
+      "!src/**/*.map",
+      "!node_modules/@ffmpeg/**"
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png"
     },
@@ -55,7 +70,10 @@
       "shortcutName": "Motionity"
     },
     "linux": {
-      "target": ["AppImage", "flatpak"],
+      "target": [
+        "AppImage",
+        "flatpak"
+      ],
       "icon": "build/icon.png",
       "category": "Graphics",
       "synopsis": "Motion graphics editor",

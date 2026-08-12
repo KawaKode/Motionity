@@ -5,6 +5,7 @@ This is a fork of the original project aiming to fix issues and add features.
 ## Running it
 
 ```bash
+npm install      # ffmpeg.wasm is vendored out of node_modules, so this is required
 npm run vendor   # downloads the third-party libraries into src/vendor/
 npm start        # http://127.0.0.1:8080
 ```

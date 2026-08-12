@@ -11,18 +11,37 @@ Three distribution targets share one source tree (`src/`, a plain static app):
 ## 0. One prerequisite for every target: vendor the assets
 
 ```bash
-npm install          # only needed for the desktop builds
-npm run vendor       # ~20 MB, writes src/vendor/ (gitignored)
+npm install          # now required for every target, not just the desktop ones
+npm run vendor       # ~24 MB, writes src/vendor/ (gitignored)
 ```
 
 `index.html` used to pull jQuery, fabric.js, lottie, pickr, selection-js, the
 WebFont loader and Inter from five different CDNs. `scripts/vendor.mjs`
-downloads all of them plus the 18.5 MB asm.js ffmpeg build into `src/vendor/`
-and the app now references only those local copies. Without this step the page
-loads but every script tag 404s.
+downloads all of them into `src/vendor/` and the app now references only those
+local copies. Without this step the page loads but every script tag 404s.
 
-The Docker build runs the vendor step inside the image, so it is the one target
-where you can skip it locally.
+ffmpeg.wasm is handled differently: `vendor.mjs` **copies** it out of
+`node_modules` instead of downloading it, which is why `npm install` is now a
+prerequisite everywhere. `package-lock.json` pins those packages by integrity
+hash, so the bytes that reach the image are the bytes npm verified. The asm.js
+build this replaced was fetched from a public archive.org mirror with no
+integrity check of any kind — a changed object there would have executed in the
+page unnoticed.
+
+Two consequences worth knowing:
+
+- `@ffmpeg/core-st` is the **single-threaded** core, chosen deliberately. The
+  default `@ffmpeg/core` is built with pthreads and needs `SharedArrayBuffer`,
+  which requires COOP/COEP cross-origin isolation, which would break the
+  Pixabay, Unsplash and Google Fonts requests the editor makes.
+- The two `@ffmpeg/*` packages are `dependencies`, not `devDependencies`, so the
+  Docker vendor stage can `npm ci --omit=dev` without pulling in electron. That
+  would make electron-builder bundle them into the asar as well, so
+  `build.files` excludes `node_modules/@ffmpeg/**` — the copies under
+  `src/vendor/ffmpeg/` are the ones the app loads.
+
+The Docker build runs `npm ci` and the vendor step inside the image, so it is
+the one target where you can skip both locally.
 
 ## 1. Desktop — Electron
 
@@ -139,7 +158,8 @@ app itself: 46 MB of bundled stock media plus 20 MB of vendored libraries.
 Two knobs if the size matters more than offline completeness:
 
 ```bash
-# -18.5 MB: MP4/GIF export fetches ffmpeg from archive.org on first use
+# -23 MB: MP4/GIF export reports itself unavailable (WEBM export is unaffected).
+# There is no runtime download to fall back on any more, by design.
 docker build --build-arg WITH_FFMPEG=0 -t motionity:slim .
 
 # -33 MB: drop the bundled royalty-free music library (removes the Audio panel
@@ -189,3 +209,6 @@ online by design, and degrade quietly rather than breaking:
    falls back to a system font. Only Inter (the UI font) is bundled.
 2. **Pixabay** — the Images, Videos and Audio browsers search Pixabay live.
 3. **Unsplash** — sample images on the empty-state screen.
+
+MP4 and GIF export used to be a fourth: the encoder came from archive.org at
+conversion time. It is now vendored, so export works fully offline.

@@ -8,7 +8,7 @@
 // fallback font when offline.
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const vendorDir = join(root, 'src', 'vendor');
 const fontsDir = join(vendorDir, 'fonts');
+const ffmpegDir = join(vendorDir, 'ffmpeg');
 
 // A desktop UA is required for the Google Fonts API to answer with woff2
 // instead of the ancient truetype payload.
@@ -52,13 +53,56 @@ const assets = [
     url: 'https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js',
     file: 'webfont.js',
   },
-  {
-    // ~18.5 MB asm.js build of ffmpeg, used by converter.js for MP4/GIF export.
-    url: 'https://archive.org/download/ffmpeg_asm/ffmpeg_asm.js',
-    file: 'ffmpeg_asm.js',
-    optional: true,
-  },
 ];
+
+// ffmpeg.wasm, used by converter.js for MP4/GIF export. Copied out of
+// node_modules rather than downloaded: package-lock.json pins these by integrity
+// hash, so the bytes that land in the image are the bytes npm verified. The
+// asm.js build this replaced came from a public archive.org mirror with no
+// integrity check at all.
+//
+// The loader's lazily-loaded webpack chunk has to sit beside it, and the core's
+// .wasm and .worker.js beside ffmpeg-core.js — the loader derives both paths by
+// substitution, so the layout is not negotiable.
+const ffmpegFiles = [
+  { from: '@ffmpeg/ffmpeg/dist/ffmpeg.min.js', to: 'ffmpeg.min.js' },
+  { from: '@ffmpeg/ffmpeg/dist/046d0074eee1d99a674a.js', to: '046d0074eee1d99a674a.js' },
+  { from: '@ffmpeg/core-st/dist/ffmpeg-core.js', to: 'ffmpeg-core.js' },
+  { from: '@ffmpeg/core-st/dist/ffmpeg-core.worker.js', to: 'ffmpeg-core.worker.js' },
+  // 23 MB, and the only reason --skip-ffmpeg exists.
+  { from: '@ffmpeg/core-st/dist/ffmpeg-core.wasm', to: 'ffmpeg-core.wasm', heavy: true },
+];
+
+// core-st is the single-threaded core on purpose: the default @ffmpeg/core is
+// built with pthreads and needs SharedArrayBuffer, which means COOP/COEP
+// isolation, which would break the Pixabay, Unsplash and Google Fonts requests.
+async function vendorFfmpeg({ skipHeavy }) {
+  // An existing checkout still has the 18.5 MB asm.js blob the archive.org path
+  // left behind. Nothing loads it any more, but src/vendor/ is packaged whole,
+  // so it would ship in every installer until someone noticed.
+  const legacy = join(vendorDir, 'ffmpeg_asm.js');
+  if (existsSync(legacy)) {
+    await rm(legacy);
+    console.log('  prune src/vendor/ffmpeg_asm.js (replaced by ffmpeg.wasm)');
+  }
+
+  await mkdir(ffmpegDir, { recursive: true });
+  for (const { from, to, heavy } of ffmpegFiles) {
+    const src = join(root, 'node_modules', from);
+    if (heavy && skipHeavy) {
+      console.log(`  omit  src/vendor/ffmpeg/${to} (--skip-ffmpeg)`);
+      continue;
+    }
+    if (!existsSync(src)) {
+      throw new Error(
+        `${from} is missing — run "npm install" before vendoring (ffmpeg.wasm now ` +
+          `comes from node_modules, not a CDN).`
+      );
+    }
+    await copyFile(src, join(ffmpegDir, to));
+    console.log(`  copy  src/vendor/ffmpeg/${to} (${human(statSync(src).size)})`);
+  }
+}
 
 const fontCss =
   'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
@@ -106,20 +150,18 @@ async function vendorFonts({ force }) {
 }
 
 const force = process.argv.includes('--force');
-// Docker builds can drop the 18.5 MB ffmpeg blob; MP4/GIF export then falls
-// back to fetching it from the public mirror at conversion time.
-const skipOptional = process.argv.includes('--skip-ffmpeg');
+// Docker builds can drop the 23 MB ffmpeg core. Unlike the old asm.js build
+// there is no runtime mirror to fall back to, so this now means MP4/GIF export
+// is unavailable in that image — converter.js says so rather than failing late.
+const skipFfmpeg = process.argv.includes('--skip-ffmpeg');
 
 await mkdir(fontsDir, { recursive: true });
 console.log(`Vendoring third-party assets into src/vendor/`);
 for (const asset of assets) {
-  if (asset.optional && skipOptional) {
-    console.log(`  omit  src/vendor/${asset.file} (--skip-ffmpeg)`);
-    continue;
-  }
   await download(asset.url, join(vendorDir, asset.file), { force });
 }
 await vendorFonts({ force });
+await vendorFfmpeg({ skipHeavy: skipFfmpeg });
 
 // Sanity check: index.html must not have regained a CDN reference.
 const html = await readFile(join(root, 'src', 'index.html'), 'utf8');

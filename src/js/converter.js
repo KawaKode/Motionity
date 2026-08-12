@@ -1,147 +1,163 @@
-// MP4/GIF export transcodes the captured WebM with an asm.js build of ffmpeg.
-// Packaged builds ship it locally (npm run vendor); a plain checkout falls back
-// to the public mirror, which needs network access.
-var FFMPEG_ASM_LOCAL = 'vendor/ffmpeg_asm.js';
-var FFMPEG_ASM_REMOTE = 'https://archive.org/download/ffmpeg_asm/ffmpeg_asm.js';
-var ffmpegAsmUrlPromise = null;
+// MP4/GIF export transcodes the captured WebM with ffmpeg.wasm.
+//
+// Everything is served from vendor/ffmpeg/, vendored out of node_modules by
+// `npm run vendor` and pinned by package-lock.json. There is deliberately no
+// CDN fallback: the asm.js build this replaced was fetched from a public
+// archive.org mirror with no integrity check, so a changed object there would
+// have run in the page unnoticed.
+//
+// The core is the single-threaded build. The default multi-threaded one needs
+// SharedArrayBuffer, which requires COOP/COEP isolation, which would break the
+// Pixabay, Unsplash and Google Fonts requests the editor makes.
 
-// The worker is built from a blob, so importScripts() needs an absolute URL.
-function resolveFfmpegAsmUrl() {
-  if (!ffmpegAsmUrlPromise) {
-    ffmpegAsmUrlPromise = fetch(FFMPEG_ASM_LOCAL, { method: 'HEAD' })
-      .then(function (res) {
-        // A catch-all/SPA route answers 200 with HTML; that is not the script.
-        var type = res.headers.get('content-type') || '';
-        var local = res.ok && type.indexOf('text/html') === -1;
-        return local
-          ? new URL(FFMPEG_ASM_LOCAL, location.href).href
-          : FFMPEG_ASM_REMOTE;
-      })
-      .catch(function () {
-        return FFMPEG_ASM_REMOTE;
-      });
+var FFMPEG_DIR = 'vendor/ffmpeg/';
+var FFMPEG_CORE = FFMPEG_DIR + 'ffmpeg-core.js';
+var FFMPEG_WASM = FFMPEG_DIR + 'ffmpeg-core.wasm';
+var FFMPEG_WORKER = FFMPEG_DIR + 'ffmpeg-core.worker.js';
+
+// One instance per conversion, deliberately not cached. The single-threaded
+// core's `main` calls exit() when the command finishes, which tears the wasm
+// runtime down: a second run on the same instance dies with "Program terminated
+// with exit(0)". Reloading costs about 110ms and returns the 23 MB heap in
+// between, so this is cheaper than it looks.
+var ffmpegBusy = false;
+
+function ffmpegAvailable() {
+  return typeof FFmpeg !== 'undefined' && typeof FFmpeg.createFFmpeg === 'function';
+}
+
+// The loader resolves the core through `new URL(corePath, import.meta.url)`,
+// which points at the bundle rather than the page once it is minified. Passing
+// all three paths absolute skips that resolution entirely.
+function absolute(path) {
+  return new URL(path, location.href).href;
+}
+
+async function loadFfmpeg() {
+  if (!ffmpegAvailable()) {
+    throw new Error(
+      'the ffmpeg.wasm loader is missing — run "npm run vendor" to populate src/vendor/'
+    );
   }
-  return ffmpegAsmUrlPromise;
-}
 
-function processInWebWorker(workerPath) {
-  var blob = URL.createObjectURL(
-    new Blob(
-      [
-        'importScripts("' +
-          workerPath +
-          '");var now = Date.now;function print(text) {postMessage({"type" : "stdout","data" : text});};onmessage = function(event) {var message = event.data;if (message.type === "command") {var Module = {print: print,printErr: print,files: message.files || [],arguments: message.arguments || [],TOTAL_MEMORY: message.TOTAL_MEMORY||536870912  || false};postMessage({"type" : "start","data" : Module.arguments.join(" ")});postMessage({"type" : "stdout","data" : "Received command: " +Module.arguments.join(" ") +((Module.TOTAL_MEMORY ) ? ".  Processing with " + Module.TOTAL_MEMORY + " bits." : "")});var time = now();var result = ffmpeg_run(Module);var totalTime = now() - time;postMessage({"type" : "stdout","data" : "Finished processing (took " + totalTime + "ms)"});postMessage({"type" : "done","data" : result,"time" : totalTime});}};postMessage({"type" : "ready"});',
-      ],
-      {
-        type: 'application/javascript',
+  // A build made with WITH_FFMPEG=0 ships the loader but not the 23 MB core,
+  // so check before paying for the load and report it as a build choice
+  // rather than a failure.
+  var head = await fetch(FFMPEG_WASM, { method: 'HEAD' }).catch(function () {
+    return null;
+  });
+  if (!head || !head.ok) {
+    throw new Error(
+      'this build ships without the ffmpeg core (WITH_FFMPEG=0), so MP4 and GIF ' +
+        'export are unavailable. WEBM export always works.'
+    );
+  }
+
+  var instance = FFmpeg.createFFmpeg({
+    corePath: absolute(FFMPEG_CORE),
+    wasmPath: absolute(FFMPEG_WASM),
+    workerPath: absolute(FFMPEG_WORKER),
+    // The loader defaults to the entry point of the multi-threaded core; the
+    // single-threaded one exports plain `main`. Without this, load() gets as
+    // far as compiling the 23 MB wasm and then aborts with
+    // "Cannot call unknown function proxy_main".
+    mainName: 'main',
+    log: false,
+    logger: function (entry) {
+      if (entry.type === 'fferr') console.debug('[ffmpeg]', entry.message);
+    },
+    progress: function (entry) {
+      if (typeof entry.ratio === 'number' && entry.ratio >= 0 && entry.ratio <= 1) {
+        $('#download-real').html('Converting ' + Math.round(entry.ratio * 100) + '%');
       }
-    )
-  );
-
-  var worker = new Worker(blob);
-  URL.revokeObjectURL(blob);
-  return worker;
+    },
+  });
+  await instance.load();
+  return instance;
 }
 
-var worker;
-// The worker is created once and reused, so its "ready" handshake only ever
-// arrives for the first conversion. Remember it across calls.
-var workerIsReady = false;
+// The recording was made at this rate, so the transcode has to keep it: a
+// different -r would duplicate or drop frames and drift the timing.
+function conversionArgs(setting, fps) {
+  if (setting === 'gif') {
+    return ['-i', 'input.webm', '-r', String(fps), 'output.gif'];
+  }
+  // libx264 rather than the mpeg4 the asm.js path used: same core, far better
+  // quality per byte, and it plays in Safari and QuickTime. yuv420p is what
+  // makes that true — x264 defaults to yuv444p here, which they refuse.
+  return [
+    '-i', 'input.webm',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-r', String(fps),
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    'output.mp4',
+  ];
+}
 
 async function convertStreams(videoBlob, setting) {
-  var aab;
-  var buffersReady = false;
-  var posted = false;
+  var outputName = setting === 'gif' ? 'output.gif' : 'output.mp4';
+  var mimeType = setting === 'gif' ? 'image/gif' : 'video/mp4';
 
   function convertFailed(reason) {
     console.error('Conversion failed: ' + reason);
     alert(
       'Sorry, the ' +
         setting.toUpperCase() +
-        ' conversion failed. The WEBM format is always available.'
+        ' conversion failed. The WEBM format is always available.\n\n' +
+        reason
     );
     resetRecordingUI();
   }
 
-  var fileReader = new FileReader();
-  fileReader.onload = function () {
-    aab = this.result;
-    buffersReady = true;
-    if (workerIsReady) postMessage();
-  };
-  fileReader.onerror = function () {
-    convertFailed('could not read the recorded video');
-  };
-  fileReader.readAsArrayBuffer(videoBlob);
-
-  if (!worker) {
-    // Safe to await here: workerIsReady is still false, so the FileReader
-    // callback cannot post a command before the worker exists.
-    worker = processInWebWorker(await resolveFfmpegAsmUrl());
+  if (setting !== 'gif' && setting !== 'mp4') {
+    convertFailed('unknown output format "' + setting + '"');
+    return;
   }
-  worker.onerror = function (e) {
-    convertFailed(e.message || 'worker error');
-  };
-  worker.onmessage = function (event) {
-    var message = event.data;
-    if (message.type == 'ready') {
-      workerIsReady = true;
-      if (buffersReady) postMessage();
-    } else if (message.type == 'done') {
-      var result = message.data && message.data[0];
-      if (!result || !result.data) {
-        convertFailed('the encoder returned no data');
-        return;
-      }
-      if (setting == 'gif') {
-        var blob = new File([result.data], 'video.gif', {
-          type: 'image/gif',
-        });
-        PostBlob(blob);
-      } else if (setting == 'mp4') {
-        var blob = new File([result.data], 'video.mp4', {
-          type: 'video/mp4',
-        });
-        PostBlob(blob);
+  if (ffmpegBusy) {
+    convertFailed('a conversion is already running — wait for it to finish');
+    return;
+  }
+
+  ffmpegBusy = true;
+  var ffmpeg = null;
+  try {
+    $('#download-real').html('Loading converter...');
+    ffmpeg = await loadFfmpeg();
+
+    ffmpeg.FS('writeFile', 'input.webm', new Uint8Array(await videoBlob.arrayBuffer()));
+    $('#download-real').html('Converting 0%');
+    await ffmpeg.run.apply(ffmpeg, conversionArgs(setting, getExportFramerate()));
+
+    var data = ffmpeg.FS('readFile', outputName);
+    if (!data || !data.length) {
+      convertFailed('the encoder returned no data');
+      return;
+    }
+    // Copy out of the wasm heap before unlinking: the view would otherwise be
+    // backed by memory ffmpeg is free to reuse.
+    PostBlob(new File([data.slice()], 'video.' + setting, { type: mimeType }));
+  } catch (err) {
+    convertFailed((err && err.message) || String(err));
+  } finally {
+    // Tear the instance down either way. After a success the runtime has
+    // already exited and is unusable; after a failure the loader's internal
+    // "running" flag would otherwise stay set and every later conversion would
+    // fail with "can only run one command at a time" until a page reload.
+    // Dropping the reference also returns the 23 MB heap and whatever MEMFS
+    // still holds, which for a long export is most of the memory in play.
+    if (ffmpeg) {
+      try {
+        ffmpeg.exit();
+      } catch (e) {
+        /* already torn down by its own exit(0) */
       }
     }
-  };
-  var postMessage = function () {
-    if (posted) return;
-    posted = true;
-    // The recording was made at this rate, so the transcode has to keep it:
-    // a fixed -r would duplicate or drop frames and drift the timing.
-    const fps = getExportFramerate();
-    if (setting == 'gif') {
-      worker.postMessage({
-        type: 'command',
-        arguments: ('-i video.webm -r ' + fps + ' output-10.gif').split(
-          ' '
-        ),
-        files: [
-          {
-            data: new Uint8Array(aab),
-            name: 'video.webm',
-          },
-        ],
-      });
-    } else if (setting == 'mp4') {
-      worker.postMessage({
-        type: 'command',
-        arguments: (
-          '-i video.webm -c:v mpeg4 -b:v 6400k -r ' +
-          fps +
-          ' -strict experimental output.mp4'
-        ).split(' '),
-        files: [
-          {
-            data: new Uint8Array(aab),
-            name: 'video.webm',
-          },
-        ],
-      });
-    }
-  };
+    ffmpegBusy = false;
+  }
 }
 
 function PostBlob(blob) {
