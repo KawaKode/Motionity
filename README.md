@@ -1,38 +1,35 @@
 # Motionity
 
-This is a fork of the original project aiming to fix issues and add features.
+Web-based motion graphics editor with keyframing, masking, filters and text animations.
 
-## Running it
+This is a fork of the original [Motionity](https://github.com/alyssaxuu/motionity) by [@alyssaxuu](https://github.com/alyssaxuu), with bug fixes and enhancements.
 
+## Quick Start
+
+**Web (localhost only):**
 ```bash
-npm install      # ffmpeg.wasm is vendored out of node_modules, so this is required
-npm run vendor   # downloads the third-party libraries into src/vendor/
-npm start        # http://127.0.0.1:8080
+npm install
+npm run vendor
+npm start  # http://127.0.0.1:8080
 ```
 
-Three packaged distributions are available — desktop (Windows `.exe`, Linux
-AppImage and Flatpak), a Docker image, and a bare-metal install. Build
-instructions for all of them are in [PACKAGING.md](PACKAGING.md).
-
+**Desktop:**
 ```bash
-npm run dev            # desktop app from source
-npm run dist:win       # Windows installer + portable exe
-npm run dist:linux     # AppImage + Flatpak
-npm run docker:build   # container image
+npm install
+npm run vendor
+npm run dev  # Electron app
 ```
 
-## Releasing
-
-```powershell
-./scripts/build-release.ps1                 # installers + SHA256SUMS.txt in dist/
-./scripts/publish.ps1 -PublishRelease       # + image push and Gitea release upload
+**Docker:**
+```bash
+npm run docker:build
+npm run docker:run  # http://localhost:8080
 ```
 
-`build-release.ps1` needs no credentials. `publish.ps1` needs a Gitea token with
-package read/write (image push) and `write:repository` (release upload), read
-from `$env:GITEA_TOKEN` or prompted for. `-BinariesOnly -NoBinaryBuild` retries a
-failed upload without rebuilding.
+Full build instructions (Windows installers, Linux AppImage/Flatpak) in [PACKAGING.md](PACKAGING.md).
 
-One rule applies to every target: browsers expose WebCodecs (the fast exporter)
-and IndexedDB (project saving) only in a secure context. `http://localhost`
-qualifies; a plain-HTTP LAN address does not. Serve it over TLS anywhere else.
+## Notes
+
+- `ffmpeg.wasm` is vendored; `npm install` + `npm run vendor` are required
+- WebCodecs and IndexedDB only work in secure context (`http://localhost` OK, plain HTTP over LAN is not)
+- Serve over TLS for remote access
