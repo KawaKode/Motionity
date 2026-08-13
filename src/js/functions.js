@@ -495,6 +495,7 @@ async function updateRecordCanvas() {
     'strokeUniform',
     'rx',
     'ry',
+    'cornerRadius',
     'selectable',
     'hasControls',
     'subTargetCheck',
@@ -684,6 +685,7 @@ function save() {
     'strokeUniform',
     'rx',
     'ry',
+    'cornerRadius',
     'selectable',
     'hasControls',
     'subTargetCheck',
@@ -1050,13 +1052,57 @@ $(document).on('click', '#redo', function () {
   }
 });
 
+// Corner radius, in the canvas pixels the panel advertises.
+//
+// fabric applies rx/ry in the object's own coordinate space, before its scale,
+// and shapes are resized by scaling rather than by changing width/height. The
+// raw input was written straight to rx, so a radius typed as 20 drew at 60 on a
+// rect scaled 3x: the value behaved like a proportion of the shape instead of
+// pixels. `cornerRadius` stores what the user asked for and rx/ry are derived
+// from it, so the same number means the same number of pixels at any size.
+function getCornerRadius(object) {
+  if (!object) {
+    return 0;
+  }
+  if (typeof object.cornerRadius == 'number') {
+    return object.cornerRadius;
+  }
+  // Projects saved before cornerRadius existed only carry the raw rx
+  return (
+    (object.get('rx') || 0) * Math.abs(object.get('scaleX') || 1)
+  );
+}
+
+function setCornerRadius(object, radius) {
+  if (!object) {
+    return;
+  }
+  var px = radius > 0 ? radius : 0;
+  object.cornerRadius = px;
+  object.set({
+    rx: px / Math.abs(object.get('scaleX') || 1),
+    ry: px / Math.abs(object.get('scaleY') || 1),
+  });
+}
+
+// Re-derive rx/ry after a resize so the drawn radius keeps the typed value
+function syncCornerRadius(object) {
+  if (!object || object.get('type') != 'rect') {
+    return;
+  }
+  if (typeof object.cornerRadius != 'number') {
+    return;
+  }
+  setCornerRadius(object, object.cornerRadius);
+}
+
 // Generate keyframes
 function keyframeChanges(object, type, id, selection) {
   if (object.get('type') == 'rect') {
-    object.set({
-      rx: parseFloat($('#object-corners input').val()),
-      ry: parseFloat($('#object-corners input').val()),
-    });
+    setCornerRadius(
+      object,
+      parseFloat($('#object-corners input').val())
+    );
   } else if (object.get('type') == 'textbox') {
     object.set({
       charSpacing: parseFloat($('#text-h input').val()) * 10,
@@ -3512,7 +3558,23 @@ function checkCrop(obj) {
   crop(canvas.getItemById('cropped'));
 }
 
+// Rotate a vector by `radians` around the origin
+function rotateVector(x, y, radians) {
+  if (!radians) {
+    return { x: x, y: y };
+  }
+  var cos = Math.cos(radians);
+  var sin = Math.sin(radians);
+  return { x: x * cos - y * sin, y: x * sin + y * cos };
+}
+
 // Perform a crop
+//
+// Everything is computed in the image's own frame rather than along the canvas
+// axes, so a rotated image crops the region the crop window actually covers.
+// The previous version compared canvas-space edges and only handled three of
+// the four quadrants, which cropped the wrong area of any rotated image (and
+// nothing at all when the crop window was centred on it).
 function crop(obj) {
   var cropUI = canvas.getItemById('crop');
   if (!obj || !cropUI || !cropobj) {
@@ -3520,58 +3582,54 @@ function crop(obj) {
   }
   cropobj.setCoords();
   cropUI.setCoords();
-  var cleft =
-    cropUI.get('left') - (cropUI.get('width') * cropUI.get('scaleX')) / 2;
-  var ctop =
-    cropUI.get('top') - (cropUI.get('height') * cropUI.get('scaleY')) / 2;
-  var height =
-    (cropUI.get('height') / cropobj.get('scaleY')) * cropUI.get('scaleY');
-  var width =
-    (cropUI.get('width') / cropobj.get('scaleX')) * cropUI.get('scaleX');
-  var img_height = cropobj.get('height') * cropobj.get('scaleY');
-  var img_width = cropobj.get('width') * cropobj.get('scaleX');
-  var left =
-    cleft -
-    (cropobj.get('left') -
-      (cropobj.get('width') * cropobj.get('scaleX')) / 2);
-  var top =
-    ctop -
-    (cropobj.get('top') -
-      (cropobj.get('height') * cropobj.get('scaleY')) / 2);
-  if (left < 0 && top > 0) {
-    obj
-      .set({ cropY: top / cropobj.get('scaleY'), height: height })
-      .setCoords();
-    canvas.renderAll();
-    obj.set({
-      top: ctop + (obj.get('height') * obj.get('scaleY')) / 2,
-    });
-    canvas.renderAll();
-  } else if (top < 0 && left > 0) {
-    obj
-      .set({ cropX: left / cropobj.get('scaleX'), width: width })
-      .setCoords();
-    canvas.renderAll();
-    obj.set({
-      left: cleft + (obj.get('width') * obj.get('scaleX')) / 2,
-    });
-    canvas.renderAll();
-  } else if (top > 0 && left > 0) {
-    obj
-      .set({
-        cropX: left / cropobj.get('scaleX'),
-        cropY: top / cropobj.get('scaleY'),
-        height: height,
-        width: width,
-      })
-      .setCoords();
-    canvas.renderAll();
-    obj.set({
-      left: cleft + (obj.get('width') * obj.get('scaleX')) / 2,
-      top: ctop + (obj.get('height') * obj.get('scaleY')) / 2,
-    });
-    canvas.renderAll();
-  }
+  // Read everything before writing: the final call passes cropobj as `obj`
+  var scaleX = cropobj.get('scaleX') || 1;
+  var scaleY = cropobj.get('scaleY') || 1;
+  var ogWidth = cropobj.get('width');
+  var ogHeight = cropobj.get('height');
+  var centerX = cropobj.get('left');
+  var centerY = cropobj.get('top');
+  var radians = fabric.util.degreesToRadians(
+    cropobj.get('angle') || 0
+  );
+
+  // The crop window carries the image's angle, so its own width and height are
+  // already axis-aligned with the image
+  var width = (cropUI.get('width') * cropUI.get('scaleX')) / scaleX;
+  var height = (cropUI.get('height') * cropUI.get('scaleY')) / scaleY;
+
+  // Where the crop window sits relative to the image centre, un-rotated
+  var offset = rotateVector(
+    cropUI.get('left') - centerX,
+    cropUI.get('top') - centerY,
+    -radians
+  );
+  var cropX = offset.x / scaleX + ogWidth / 2 - width / 2;
+  var cropY = offset.y / scaleY + ogHeight / 2 - height / 2;
+
+  // Never leave the source bitmap: fabric draws nothing for a negative crop
+  width = Math.max(1, Math.min(width, ogWidth));
+  height = Math.max(1, Math.min(height, ogHeight));
+  cropX = Math.max(0, Math.min(cropX, ogWidth - width));
+  cropY = Math.max(0, Math.min(cropY, ogHeight - height));
+
+  // Put the cropped object back under the (clamped) region it represents
+  var center = rotateVector(
+    (cropX + width / 2 - ogWidth / 2) * scaleX,
+    (cropY + height / 2 - ogHeight / 2) * scaleY,
+    radians
+  );
+  obj
+    .set({
+      cropX: cropX,
+      cropY: cropY,
+      width: width,
+      height: height,
+      left: centerX + center.x,
+      top: centerY + center.y,
+    })
+    .setCoords();
+  canvas.renderAll();
   if (obj.get('id') != 'cropped') {
     canvas.remove(cropUI);
     canvas.remove(canvas.getItemById('crop-overlay'));
@@ -3626,20 +3684,23 @@ function cropImage(object) {
     cropobj = object;
     canvas.uniformScaling = false;
     cropobj.setCoords();
-    var left =
-      cropobj.get('left') -
-      (cropobj.get('width') * cropobj.get('scaleX')) / 2;
-    var top =
-      cropobj.get('top') -
-      (cropobj.get('height') * cropobj.get('scaleY')) / 2;
+    // The visible region, in the source bitmap's own pixels, before the image
+    // is expanded back to its full size below
     var cropx = cropobj.get('cropX');
     var cropy = cropobj.get('cropY');
+    var shownWidth = cropobj.get('width');
+    var shownHeight = cropobj.get('height');
+    var shownLeft = cropobj.get('left');
+    var shownTop = cropobj.get('top');
     overlay();
     var cropUI = new fabric.Rect({
       left: object.get('left'),
       top: object.get('top'),
       width: object.get('width') * object.get('scaleX') - 5,
       height: object.get('height') * object.get('scaleY') - 5,
+      // The crop window has to turn with the image, otherwise the region it
+      // covers cannot be expressed as a crop at all
+      angle: object.get('angle') || 0,
       originX: 'center',
       originY: 'center',
       id: 'crop',
@@ -3674,15 +3735,19 @@ function cropImage(object) {
       })
       .setCoords();
     canvas.renderAll();
+    // Growing back to the full bitmap moves the centre, so shift the image so
+    // the region that was on screen stays exactly where it was. The offset is
+    // in the image's own frame, hence the rotation.
+    var shift = rotateVector(
+      (cropx + shownWidth / 2 - cropobj.get('width') / 2) *
+        cropobj.get('scaleX'),
+      (cropy + shownHeight / 2 - cropobj.get('height') / 2) *
+        cropobj.get('scaleY'),
+      fabric.util.degreesToRadians(cropobj.get('angle') || 0)
+    );
     cropobj.set({
-      left:
-        left +
-        (cropobj.get('width') * cropobj.get('scaleX')) / 2 -
-        cropx * cropobj.get('scaleX'),
-      top:
-        top +
-        (cropobj.get('height') * cropobj.get('scaleY')) / 2 -
-        cropy * cropobj.get('scaleY'),
+      left: shownLeft - shift.x,
+      top: shownTop - shift.y,
     });
     cropUI.setControlsVisibility({
       mt: false,
@@ -4058,6 +4123,7 @@ function newRectangle(color) {
     backgroundColor: 'rgba(255,255,255,0)',
     rx: 0,
     ry: 0,
+    cornerRadius: 0,
     fill: color,
     cursorWidth: 1,
     cursorDuration: 1,
@@ -4862,9 +4928,17 @@ function bindPointerDrag(e, el, onMove, onEnd) {
   window.addEventListener('blur', end);
 }
 
+// A modal covers the timeline but does not cover pointer events, so every
+// timeline drag has to opt out while one is open - otherwise the seekbar,
+// keyframes, layer bars and the resize handle all still react to a drag
+// happening "behind" the dialog.
+function modalOpen() {
+  return $('.modal-open').length > 0;
+}
+
 // Dragging a keyframe
 function dragKeyframe(e) {
-  if (e.which == 3) {
+  if (e.which == 3 || modalOpen()) {
     return false;
   }
   e.stopPropagation();
@@ -5014,7 +5088,7 @@ function updateTime(drag, check) {
 
 // Dragging the seekbar
 function dragSeekBar(e) {
-  if (e.which == 3) {
+  if (e.which == 3 || modalOpen()) {
     return false;
   }
   // Stop the browser from turning the press into a native drag-and-drop.
@@ -5085,7 +5159,7 @@ $(document).on(
 
 // Dragging layer horizontally
 function dragObjectProps(e) {
-  if (e.which == 3) {
+  if (e.which == 3 || modalOpen()) {
     return false;
   }
   var drag = $(this).parent();
@@ -5299,7 +5373,7 @@ function resetHeight() {
 
 // Dragging timeline vertically
 function dragTimeline(e) {
-  if (e.which == 3) {
+  if (e.which == 3 || modalOpen()) {
     return false;
   }
   // Suppress text selection for the duration of the drag only - leaving these

@@ -315,3 +315,56 @@ held the Playwright profile lock), so the following still needs a manual pass:
    console shows `Rendering n%` (frame-accurate path) and not
    `Falling back to the real-time encoder`
 4. Play the result: check audio is in sync and the video layer is not smeared
+
+---
+
+## Upstream open issues (alyssaxuu/motionity)
+
+The 13 bug reports still open upstream were replayed in Chromium against this
+fork. Nine were already fixed by the audit above — mp4 export (#16), blank
+render (#25), image download (#10), audio on download (#30), filters not
+retained (#24), `EyeDropper is not defined` (#15, #18), the endless
+*Loading video…* (#28) and text selection while resizing the timeline (#5).
+GIF export (#21) works through the same ffmpeg path. #8 (video from the search
+tab) needs a Pixabay API key, so it stays untested; #29 and #4 carry no
+reproducer. The remaining three are fixed here:
+
+- [x] **#23 — Border radius behaved like a percentage** — `src/js/functions.js`,
+  `src/js/ui.js`, `src/js/events.js`, `src/js/database.js`
+  fabric applies `rx`/`ry` before the object's scale, and shapes are resized by
+  scaling, so a radius typed as 20 drew at 60 px on a rect scaled 3x while the
+  panel — which read `rx` back raw — still said 20. A new `cornerRadius` property
+  stores the pixel value the user asked for; `rx`/`ry` are derived from it
+  (`setCornerRadius`) and re-derived on `object:scaling` / `object:modified`
+  (`syncCornerRadius`), so the same number means the same pixels at any size.
+  `cornerRadius` was added to the four serialised property lists, and
+  `getCornerRadius` falls back to `rx * scaleX` for projects saved before it
+  existed. Known limit, unchanged from before: if `scaleX` is *keyframed*, the
+  drawn radius still varies over the animation.
+  Verified: typed 20 px draws a 20 px corner at scale 1 and at scale 3, the
+  panel keeps reading 20, and the value survives save, JSON round-trip and a
+  page reload.
+
+- [x] **#27 — Cropping a rotated image** — `src/js/functions.js`
+  `crop()` compared canvas-space edges and covered only three of the four
+  quadrants, so any rotated image cropped the wrong region — and nothing at all
+  when the crop window was centred on it, since all three branches need a
+  strictly positive offset. The guards added in the audit stopped the crash but
+  left the geometry wrong. `crop()` now works in the image's own frame
+  (`rotateVector`), clamps the region to the bitmap, and re-centres the object on
+  the region it kept; the crop window is created with the image's `angle`, and
+  the "expand back to the full bitmap" shift in `cropImage` is rotated the same
+  way. The four-branch soup is gone.
+  Verified: at 0°, 30° and 45°, the pixels under the crop window are byte
+  identical before and after the crop, everything outside it is dropped, and
+  crop mode exits cleanly.
+
+- [x] **#1 — A modal did not block the timeline** — `src/js/functions.js`
+  Modals are painted over the timeline but never took its pointer events, so the
+  resize handle, the seekbar, keyframes and layer bars all still reacted to a
+  drag behind the dialog. The onboarding modal from the report does not exist in
+  the open-source build; the export, import/export and credits modals all had
+  the bug. `dragTimeline`, `dragSeekBar`, `dragKeyframe` and `dragObjectProps`
+  now bail while `.modal-open` is present.
+  Verified: with the export modal open a real mouse drag on the handle leaves
+  the timeline height untouched, and dragging works again once it closes.

@@ -100,6 +100,8 @@ $(document).ready(function () {
   canvas.on('object:scaling', function (e) {
     e.target.hasControls = false;
     centerLines(e);
+    // Keep the corner radius at its pixel value while the handle is dragged
+    syncCornerRadius(e.target);
     if (cropping) {
       updateCropBounds();
       crop(canvas.getItemById('cropped'));
@@ -135,12 +137,16 @@ $(document).ready(function () {
       canvas.renderAll();
       if (e.target.type == 'activeSelection') {
         const tempselection = canvas.getActiveObject();
+        // Discarding first bakes the group transform into the children, so
+        // their scale is final by the time the radius is re-derived
         canvas.discardActiveObject();
         e.target._objects.forEach(function (object) {
+          syncCornerRadius(object);
           autoKeyframe(object, e, true);
         });
         reselect(tempselection);
       } else {
+        syncCornerRadius(e.target);
         autoKeyframe(e.target, e, false);
       }
       updatePanelValues();

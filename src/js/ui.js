@@ -570,7 +570,7 @@ function updatePanelValues() {
     o_slider.setValue(object.get('opacity') * 100);
     if (object.get('type') == 'rect') {
       $('#object-corners input').val(
-        parseFloat(object.get('rx').toFixed(2))
+        parseFloat(getCornerRadius(object).toFixed(2))
       );
       colormode = 'fill';
       o_fill.setColor(object.get('fill'));
