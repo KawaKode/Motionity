@@ -1785,6 +1785,14 @@ function importExportModal() {
 }
 $('#share').on('click', importExportModal);
 
+// Open credits modal
+function creditsModal() {
+  hideModals();
+  $('#credits-modal').toggleClass('modal-open');
+  $('#background-overlay').toggleClass('modal-open');
+}
+$('#credits-button').on('click', creditsModal);
+
 function searchInput() {
   var value = $(this).val().toLowerCase();
   if (value == '') {

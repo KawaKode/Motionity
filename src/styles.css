@@ -204,6 +204,27 @@ body {
 .hand-active:hover {
   cursor: pointer;
 }
+#credits-button {
+  width: 100px;
+  position: absolute;
+  right: 330px;
+  bottom: 12px;
+  height: 38px;
+  line-height: 38px;
+  text-align: center;
+  background-color: #30314e;
+  color: var(--main-text-color);
+  border-radius: 5px;
+  box-shadow: inset 0px 2px 2px rgba(255, 255, 255, 0.05),
+    inset 0px -2px 1px rgba(0, 0, 0, 0.05);
+  font-family: Inter;
+  font-weight: 500;
+  font-size: 14px;
+}
+#credits-button:hover {
+  cursor: pointer;
+  opacity: 0.7;
+}
 /* Bottom of canvas */
 #bottom-canvas {
   position: absolute;
@@ -211,58 +232,6 @@ body {
   right: -20px;
   z-index: 9999999;
   width: 100%;
-}
-#sponsor {
-  position: absolute;
-  bottom: 10px;
-  left: -10px;
-  height: 32px;
-  line-height: 32px;
-  font-family: Inter;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--accent-color);
-  background: rgba(22, 95, 205, 0.1);
-  text-align: center;
-  text-decoration: none;
-  padding-left: 10px;
-  padding-right: 10px;
-  border-radius: 5px;
-}
-#sponsor img {
-  margin-right: 3px;
-  margin-bottom: -2px;
-}
-#sponsor:hover {
-  background: rgba(22, 95, 205, 0.3) !important;
-}
-#alyssa-credit {
-  color: var(--secondary-text-color);
-  font-size: 14px;
-  font-weight: 500;
-  position: absolute;
-  right: -20px;
-  bottom: 15px;
-  font-family: Inter;
-  width: 200px;
-  filter: drop-shadow(0px 1px 15px #141629);
-  text-decoration: none !important;
-}
-#alyssa-credit:hover {
-  filter: drop-shadow(0px 1px 10px #141629) !important;
-}
-#alyssa-credit span {
-  color: var(--main-text-color) !important;
-  text-decoration: none !important;
-  display: inline-block;
-}
-#alyssa-credit img {
-  display: inline-block;
-  margin-left: 5px;
-  border-radius: 50%;
-  vertical-align: middle;
-  width: 18px;
-  margin-top: -2px;
 }
 .hide-folder {
   display: none !important;
@@ -1374,6 +1343,49 @@ input[type="number"] {
   visibility: hidden;
   display: block;
   z-index: 99999999999;
+}
+/* Credits modal */
+#credits-modal {
+  width: 300px;
+  max-height: 400px;
+  background-color: var(--panel-back);
+  border: 1px solid var(--panel-stroke);
+  border-radius: 5px;
+  box-shadow: 0px 4px 20px rgba(0, 0, 0, 0.3);
+  position: absolute;
+  right: 280px;
+  bottom: 60px;
+  visibility: hidden;
+  display: block;
+  z-index: 99999999999;
+  padding-bottom: 15px;
+  overflow-y: auto;
+}
+#credits-modal .header {
+  margin-bottom: 15px;
+}
+#credits-modal .subtitle {
+  margin-left: 20px;
+  margin-bottom: 5px;
+  font-size: 13px;
+}
+#credits-modal .subtitle span {
+  color: var(--main-text-color) !important;
+  font-weight: 500;
+}
+#credits-modal .subheader {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+#credits-list {
+  margin-left: 20px;
+  margin-right: 20px;
+}
+.credit-item {
+  color: var(--secondary-text-color);
+  font-family: Inter;
+  font-size: 13px;
+  margin-bottom: 8px;
 }
 .subtitle {
   color: var(--secondary-text-color);

@@ -22,8 +22,7 @@ npm run dev  # Electron app
 
 **Docker:**
 ```bash
-npm run docker:build
-npm run docker:run  # http://localhost:8080
+docker-compose up  # http://localhost:8080
 ```
 
 Full build instructions (Windows installers, Linux AppImage/Flatpak) in [PACKAGING.md](PACKAGING.md).
