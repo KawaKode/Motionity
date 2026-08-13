@@ -14,8 +14,10 @@
     instead (creating the release if it does not exist).
 
     -BinariesOnly ships just the installers: no docker build, no docker login, no
-    image push, and the release upload is implied. That is also the mode to use on
-    a Linux host or in WSL, where the AppImage and Flatpak targets actually build.
+    image push, and the release upload is implied. It takes the target list to
+    build (win, linux-appimage, linux-flatpak — comma-separated) and that list
+    overrides -Targets. The Linux targets need a Linux host or WSL, which is where
+    -BinariesOnly linux-appimage,linux-flatpak belongs.
 
     Credentials are read, in order of precedence:
       1. -Username / -Password parameters
@@ -35,13 +37,19 @@
     Full release: push the image and attach every dist/ installer to release v1.1.0.
 
 .EXAMPLE
-    ./scripts/publish.ps1 -BinariesOnly -Targets win -Tag v1.1.0
+    ./scripts/publish.ps1 -BinariesOnly win -Tag v1.1.0
     Windows installers only — build them and attach them to release v1.1.0. Docker
     is never invoked, so this works with Docker Desktop stopped.
 
 .EXAMPLE
-    ./scripts/publish.ps1 -BinariesOnly -NoBinaryBuild -Tag v1.1.0
-    Retry a failed upload: attach the installers already in dist/ without rebuilding.
+    ./scripts/publish.ps1 -BinariesOnly win,linux-appimage -Tag v1.1.0
+    Windows installers plus the Linux AppImage (no Flatpak), attached to v1.1.0.
+
+.EXAMPLE
+    ./scripts/publish.ps1 -BinariesOnly win -NoBinaryBuild -Tag v1.1.0
+    Retry a failed upload: attach the installers already in dist/ without rebuilding
+    (the target list is required syntactically but ignored — every dist/ installer
+    for the tag is uploaded regardless).
 
 .EXAMPLE
     ./scripts/publish.ps1 -NoBinaries
@@ -92,8 +100,8 @@ param(
     # Skip building the desktop installers.
     [switch]$NoBinaries,
 
-    # Forwarded to build-release.ps1.
-    [ValidateSet("win", "linux")]
+    # Forwarded to build-release.ps1. "linux" is shorthand for both Linux bundles.
+    [ValidateSet("win", "linux", "linux-appimage", "linux-flatpak")]
     [string[]]$Targets = @("win", "linux"),
     [switch]$SkipVendor,
 
@@ -103,7 +111,10 @@ param(
 
     # Ship only the installers: no docker build, login or push. Implies
     # -PublishRelease, since building alone is what build-release.ps1 already does.
-    [switch]$BinariesOnly,
+    # Takes the target list to build (comma-separated), which overrides -Targets:
+    #   -BinariesOnly win,linux-appimage
+    [ValidateSet("win", "linux-appimage", "linux-flatpak")]
+    [string[]]$BinariesOnly,
 
     # Attach the installers to the Gitea release for $Tag, creating the release if
     # it is missing.
@@ -122,11 +133,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Invoke-Checked {
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$Args)
-    Write-Host "  > $Exe $($Args -join ' ')" -ForegroundColor DarkGray
-    & $Exe @Args
+    # $CmdArgs, not $Args: $Args is a PowerShell automatic variable and never
+    # binds the passed array, so `& $Exe @Args` would run the exe bare.
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$CmdArgs)
+    Write-Host "  > $Exe $($CmdArgs -join ' ')" -ForegroundColor DarkGray
+    & $Exe @CmdArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "'$Exe $($Args -join ' ')' failed with exit code $LASTEXITCODE."
+        throw "'$Exe $($CmdArgs -join ' ')' failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -283,20 +296,25 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
     # --- Mode resolution ------------------------------------------------------
-    if ($BinariesOnly -and $NoBinaries) {
+    # -BinariesOnly is a target list, so its mere presence (a non-empty array) is
+    # what selects the mode.
+    $binariesOnlyMode = $BinariesOnly.Count -gt 0
+    if ($binariesOnlyMode -and $NoBinaries) {
         throw "-BinariesOnly and -NoBinaries cancel each other out — pick one."
     }
     if ($NoBinaryBuild -and $NoBinaries) {
         throw "-NoBinaryBuild reuses the build that -NoBinaries skips entirely — pick one."
     }
-    if ($BinariesOnly) {
+    if ($binariesOnlyMode) {
         # Nothing to build, log into or push on the container side, and uploading
         # is the whole point (build-release.ps1 alone covers "just build them").
         $NoBuild        = $true
         $SkipLogin      = $true
         $PublishRelease = $true
+        # The targets named on -BinariesOnly are what to build.
+        $Targets        = $BinariesOnly
     }
-    $pushImage = -not $BinariesOnly
+    $pushImage = -not $binariesOnlyMode
 
     if (-not $ReleaseRepo) { $ReleaseRepo = "$Owner/$Repo" }
     if (-not $ApiBase)     { $ApiBase = "https://$Registry" }

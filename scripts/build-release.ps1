@@ -37,13 +37,18 @@
     Windows installers only, named v1.1.0.
 
 .EXAMPLE
+    ./scripts/build-release.ps1 -Targets win,linux-appimage
+    Windows installers plus the Linux AppImage — no Flatpak.
+
+.EXAMPLE
     ./scripts/build-release.ps1 -SkipVendor -SkipDeps
     Reuse src/vendor/ and node_modules as they are — the fast rebuild.
 #>
 [CmdletBinding()]
 param(
-    # Platforms to package. "win" is NSIS + portable, "linux" is AppImage + Flatpak.
-    [ValidateSet("win", "linux")]
+    # Platforms to package. "win" is NSIS + portable; "linux-appimage" and
+    # "linux-flatpak" are the two Linux bundles, and "linux" is shorthand for both.
+    [ValidateSet("win", "linux", "linux-appimage", "linux-flatpak")]
     [string[]]$Targets = @("win", "linux"),
 
     # Version used in the artifact names. Defaults to v<package.json version>,
@@ -64,11 +69,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Invoke-Checked {
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$Args)
-    Write-Host "  > $Exe $($Args -join ' ')" -ForegroundColor DarkGray
-    & $Exe @Args
+    # NB: the param is $CmdArgs, not $Args. $Args is an automatic variable in
+    # PowerShell; a param of that name never binds the passed array (it stays the
+    # function's own empty $args), so `& $Exe @Args` would run the exe with no
+    # arguments — e.g. bare `npm`, which just prints usage and exits 1.
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$CmdArgs)
+    Write-Host "  > $Exe $($CmdArgs -join ' ')" -ForegroundColor DarkGray
+    & $Exe @CmdArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "'$Exe $($Args -join ' ')' failed with exit code $LASTEXITCODE."
+        throw "'$Exe $($CmdArgs -join ' ')' failed with exit code $LASTEXITCODE."
     }
 }
 
@@ -101,11 +110,20 @@ try {
     Write-Host "  output  : $distDir"
     Write-Host ""
 
+    # Expand "linux" to its two concrete bundles and drop duplicates, so the rest
+    # of the script only ever deals with win / linux-appimage / linux-flatpak.
+    $resolvedTargets = @()
+    foreach ($t in $Targets) {
+        if ($t -eq "linux") { $resolvedTargets += "linux-appimage", "linux-flatpak" }
+        else                { $resolvedTargets += $t }
+    }
+    $resolvedTargets = @($resolvedTargets | Select-Object -Unique)
+
     # electron-builder produces AppImage and Flatpak with Linux-only tooling
     # (appimagetool, flatpak-builder). Warned rather than blocked: the same script
     # runs under pwsh on a Linux box or in WSL, which is where that target belongs.
-    if ($Targets -contains "linux" -and $env:OS -eq "Windows_NT") {
-        Write-Warning "the linux target needs a Linux host or WSL — electron-builder cannot produce AppImage or Flatpak on Windows (PACKAGING.md has the WSL setup)."
+    if (($resolvedTargets -like "linux-*") -and $env:OS -eq "Windows_NT") {
+        Write-Warning "the Linux targets need a Linux host or WSL — electron-builder cannot produce AppImage or Flatpak on Windows (PACKAGING.md has the WSL setup)."
     }
 
     if ($Clean) {
@@ -161,7 +179,7 @@ try {
         throw 'electron-builder not found in node_modules — run "npm ci" (or drop -SkipDeps).'
     }
 
-    foreach ($target in $Targets) {
+    foreach ($target in $resolvedTargets) {
         Write-Host "Packaging $target..." -ForegroundColor Cyan
 
         # --publish never: electron-builder otherwise tries to upload to whatever
@@ -175,10 +193,15 @@ try {
                     "-c.portable.artifactName=$(Get-ArtifactName "$prefix-win-x64-portable")"
                 )
             }
-            "linux" {
+            "linux-appimage" {
                 $builderArgs = @(
-                    "--linux", "AppImage", "flatpak", "--publish", "never",
-                    "-c.appImage.artifactName=$(Get-ArtifactName "$prefix-linux-x86_64")",
+                    "--linux", "AppImage", "--publish", "never",
+                    "-c.appImage.artifactName=$(Get-ArtifactName "$prefix-linux-x86_64")"
+                )
+            }
+            "linux-flatpak" {
+                $builderArgs = @(
+                    "--linux", "flatpak", "--publish", "never",
                     "-c.flatpak.artifactName=$(Get-ArtifactName "$prefix-linux-x86_64")"
                 )
             }
