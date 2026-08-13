@@ -1,0 +1,72 @@
+name: Sync Gitea releases to GitHub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+env:
+  GITEA_URL: https://git.azuze.fr
+  GITEA_OWNER: kawa
+  GITEA_REPO: Motionity
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch Gitea releases and sync to GitHub
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          AUTH_HEADER=()
+          if [ -n "${GITEA_TOKEN:-}" ]; then
+            AUTH_HEADER=(-H "Authorization: token ${GITEA_TOKEN}")
+          fi
+          # Récupère toutes les releases Gitea (pagination simple, 50 max, ajuster si besoin)
+          releases=$(curl -sf "${AUTH_HEADER[@]}" \
+            "${GITEA_URL}/api/v1/repos/${GITEA_OWNER}/${GITEA_REPO}/releases?limit=50")
+          echo "$releases" | jq -c '.[]' | while read -r release; do
+            tag=$(echo "$release" | jq -r '.tag_name')
+            name=$(echo "$release" | jq -r '.name // .tag_name')
+            body=$(echo "$release" | jq -r '.body // ""')
+            prerelease=$(echo "$release" | jq -r '.prerelease')
+            draft=$(echo "$release" | jq -r '.draft')
+            # Skip si la release existe déjà sur GitHub
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag existe déjà sur GitHub, on passe."
+              continue
+            fi
+            echo "Création de la release $tag sur GitHub..."
+            flags=()
+            [ "$prerelease" = "true" ] && flags+=(--prerelease)
+            [ "$draft" = "true" ] && flags+=(--draft)
+            # Le tag doit exister sur le repo GitHub ; s'il n'existe pas encore,
+            # on utilise --notes-file avec target par défaut (branche par défaut)
+            gh release create "$tag" \
+              --title "$name" \
+              --notes "$body" \
+              "${flags[@]}"
+            # Télécharge et attache les assets de la release Gitea
+            asset_count=$(echo "$release" | jq '.assets | length')
+            if [ "$asset_count" -gt 0 ]; then
+              tmpdir=$(mktemp -d)
+              echo "$release" | jq -c '.assets[]' | while read -r asset; do
+                asset_name=$(echo "$asset" | jq -r '.name')
+                asset_url=$(echo "$asset" | jq -r '.browser_download_url')
+                echo "Téléchargement de $asset_name..."
+                curl -sfL "${AUTH_HEADER[@]}" -o "${tmpdir}/${asset_name}" "$asset_url"
+                gh release upload "$tag" "${tmpdir}/${asset_name}" --clobber
+              done
+              rm -rf "$tmpdir"
+            fi
+          done
