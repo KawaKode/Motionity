@@ -2,6 +2,7 @@
   "name": "motionity",
   "productName": "Motionity",
   "version": "2.0.1",
+  "desktopName": "app.motionity.desktop.desktop",
   "description": "Web-based motion graphics editor with keyframing, masking, filters and text animations",
   "license": "MIT",
   "author": "Kawa",
@@ -16,6 +17,7 @@
     "dist:appimage": "npm run vendor && npm run icons && electron-builder --linux AppImage",
     "dist:flatpak": "npm run vendor && npm run icons && electron-builder --linux flatpak",
     "dist:linux": "npm run vendor && npm run icons && electron-builder --linux AppImage flatpak",
+    "dist:linux:wsl": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Targets linux -UseWsl",
     "docker:build": "docker build -t motionity:latest .",
     "docker:run": "docker run --rm -p 8080:8080 motionity:latest",
     "release:build": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
@@ -78,6 +80,7 @@
       "icon": "build/icon.png",
       "category": "Graphics",
       "synopsis": "Motion graphics editor",
+      "syncDesktopName": true,
       "desktop": {
         "entry": {
           "Name": "Motionity",

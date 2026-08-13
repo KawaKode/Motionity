@@ -16,8 +16,8 @@
     -BinariesOnly ships just the installers: no docker build, no docker login, no
     image push, and the release upload is implied. It takes the target list to
     build (win, linux-appimage, linux-flatpak — comma-separated) and that list
-    overrides -Targets. The Linux targets need a Linux host or WSL, which is where
-    -BinariesOnly linux-appimage,linux-flatpak belongs.
+    overrides -Targets. The Linux targets need a Linux host or WSL: on Windows,
+    add -UseWsl and build-release.ps1 hands them to a WSL distro.
 
     Credentials are read, in order of precedence:
       1. -Username / -Password parameters
@@ -44,6 +44,11 @@
 .EXAMPLE
     ./scripts/publish.ps1 -BinariesOnly win,linux-appimage -Tag v1.1.0
     Windows installers plus the Linux AppImage (no Flatpak), attached to v1.1.0.
+
+.EXAMPLE
+    ./scripts/publish.ps1 -Tag v1.1.0 -PublishRelease -UseWsl
+    Full release from Windows: image push, .exe installers built natively, AppImage
+    and Flatpak built in WSL, everything attached to release v1.1.0.
 
 .EXAMPLE
     ./scripts/publish.ps1 -BinariesOnly win -NoBinaryBuild -Tag v1.1.0
@@ -104,6 +109,11 @@ param(
     [ValidateSet("win", "linux", "linux-appimage", "linux-flatpak")]
     [string[]]$Targets = @("win", "linux"),
     [switch]$SkipVendor,
+
+    # Forwarded to build-release.ps1: build the Linux targets in a WSL distro
+    # instead of warning that Windows cannot produce them.
+    [switch]$UseWsl,
+    [string]$WslDistro,
 
     # Reuse the installers already in dist/ instead of re-running the build. For
     # retrying a failed upload without paying for the build again.
@@ -413,7 +423,17 @@ try {
             # `& script.ps1` leaves $LASTEXITCODE untouched, and with -NoBuild no
             # docker command has reset it, so checking it would rethrow whatever the
             # caller's shell last failed at.
-            & (Join-Path $PSScriptRoot "build-release.ps1") -Tag $Tag -Targets $Targets -SkipVendor:$SkipVendor
+            # -WslDistro is only passed when set: build-release.ps1 treats an empty
+            # string as "not requested" either way, but splatting nothing keeps the
+            # -WhatIf/-Verbose trace readable.
+            $buildParams = @{
+                Tag        = $Tag
+                Targets    = $Targets
+                SkipVendor = $SkipVendor
+                UseWsl     = $UseWsl
+            }
+            if ($WslDistro) { $buildParams["WslDistro"] = $WslDistro }
+            & (Join-Path $PSScriptRoot "build-release.ps1") @buildParams
         }
 
         $artifacts = @(Get-ChildItem $distDir -Filter "motionity-$Tag-*" -File | ForEach-Object FullName)

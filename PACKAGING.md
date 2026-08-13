@@ -69,6 +69,28 @@ Each `dist:*` script re-runs `vendor` and regenerates `build/icon.png`
 (`scripts/make-icon.cjs` rasterises the logo geometry with zlib only — no
 ImageMagick, no sharp).
 
+### Why `desktopName` is `app.motionity.desktop.desktop`
+
+The doubled suffix is correct, do not trim it. Electron reads the **root-level**
+`desktopName` from `package.json` and derives the Wayland `app_id` / X11
+`WM_CLASS` from it with the `.desktop` suffix stripped, so the value has to be
+the desktop *file name*, not the app id. Flatpak in turn installs the entry as
+`<appId>.desktop` and nothing can rename it — with `appId`
+`app.motionity.desktop`, the file is `app.motionity.desktop.desktop`.
+
+`linux.syncDesktopName: true` makes electron-builder use the same base name for
+the AppImage's embedded entry and write a matching `StartupWMClass`. Without the
+pair, the build warns
+
+```
+electron uses desktopName as app_id / WM_CLASS for window association.
+  reason=desktopName is not set in package.json
+```
+
+and the running window is not linked to its launcher entry: GNOME shows a
+generic icon and a second, unpinnable dock item instead of the installed app.
+Changing `appId` means changing `desktopName` in step with it.
+
 ### If the NSIS step fails with "Access denied" on `Motionity.exe`
 
 On a locked-down Windows machine the security agent can take an exclusive lock
@@ -102,22 +124,58 @@ $env:ELECTRON_RUN_AS_NODE=$null; npm run dev  # PowerShell
 
 ### Is WSL enough for AppImage and Flatpak?
 
-**AppImage: yes.** electron-builder produces the squashfs itself, so no FUSE is
-needed at build time. To *run* the result inside WSL you need `libfuse2`
-(or `./Motionity-1.0.0-x64.AppImage --appimage-extract-and-run`), and WSLg on
-Windows 11 gives you the GUI.
+Yes, and `build-release.ps1 -UseWsl` does it for you from Windows:
 
-**Flatpak: technically yes, practically annoying.** `flatpak-builder` runs under
-WSL2 (the kernel has the user namespaces and `/dev/fuse` that bubblewrap needs),
-but you must install the runtimes by hand first and there is no
-`xdg-desktop-portal` to fall back on. If it fights you, build it in a Linux
-container instead — it is the same command with fewer moving parts.
+```powershell
+./scripts/build-release.ps1 -UseWsl                       # .exe on Windows, Linux bundles in WSL
+./scripts/build-release.ps1 -Targets linux -UseWsl        # Linux bundles only
+./scripts/publish.ps1 -Tag v2.0.1 -PublishRelease -UseWsl # same, then attach to the Gitea release
+```
+
+Both bundles have been built this way on this machine (`Ubuntu`, WSL2 kernel
+6.18): a 172 MB AppImage and a 133 MB Flatpak, checksums verified with
+`sha256sum -c`. Under the hood:
+
+- the `npm ci`, `vendor` and icon steps run **once on the Windows side**, and the
+  WSL build reads them back through `/mnt/c` — one worktree, no second checkout;
+- only `linux-appimage` and `linux-flatpak` are delegated. `-UseWsl` on a Linux
+  host, or with no Linux target, warns and changes nothing;
+- the distro is the first installed one that is not `docker-desktop`, override
+  with `-WslDistro`. `docker-desktop` is skipped deliberately: it is Docker's own
+  LinuxKit VM, with no apt and no home to install the flatpak runtimes into, and
+  it is usually the *default* distro, so a blind `wsl --` lands there;
+- missing tooling fails **before** the build with the apt or `flatpak install`
+  line to run, because electron-builder's own error for an absent flatpak ref is
+  a bare exit code naming neither the ref nor the remote.
+
+**Why the build stages in `~/.cache/motionity-build` and not in `dist/`.**
+electron-builder chmods every file it unpacks from the Electron zip, and `/mnt/c`
+is mounted without the `metadata` option, so chmod is refused:
+
+```
+⨯ EPERM: operation not permitted, chmod '.../dist/linux-unpacked.tmp/locales/de.pak'
+```
+
+The alternative fix is `options = "metadata"` under `[automount]` in
+`/etc/wsl.conf` plus a `wsl --shutdown` — a global, sudo-and-reboot change to the
+distro. Building into ext4 and copying the two finished bundles back into `dist/`
+needs neither, and is faster anyway. Reading `src/` over the mount is fine;
+nothing chmods the input. The copy back is `cp -f`, never `cp -p` — preserving
+modes means chmod, which is the EPERM being avoided.
+
+**AppImage** needs no extra tooling: electron-builder downloads its own appimage
+bundle and writes the squashfs itself, no FUSE at build time. To *run* the result
+inside WSL you need `libfuse2` (or
+`./motionity-*.AppImage --appimage-extract-and-run`); WSLg gives you the GUI.
+
+**Flatpak** needs `flatpak-builder` and the runtimes installed by hand — the
+WSL2 kernel has the user namespaces and `/dev/fuse` that bubblewrap wants, but
+there is no `xdg-desktop-portal` to fall back on.
 
 **`.exe`: no.** Build it on the Windows side. Cross-building NSIS from Linux
 needs Wine and rules out signing.
 
-This machine currently has no WSL distro other than `docker-desktop`, so the
-Linux targets have not been run here. Setup, from PowerShell:
+One-time distro setup, from PowerShell:
 
 ```powershell
 wsl --install -d Ubuntu
@@ -127,7 +185,7 @@ Then inside Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y nodejs npm libfuse2            # AppImage
+sudo apt install -y nodejs npm libfuse2               # AppImage (libfuse2 only to run it)
 sudo apt install -y flatpak flatpak-builder elfutils  # Flatpak
 flatpak remote-add --if-not-exists --user flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -135,14 +193,22 @@ flatpak install --user -y flathub \
   org.freedesktop.Platform//23.08 \
   org.freedesktop.Sdk//23.08 \
   org.electronjs.Electron2.BaseApp//23.08
-
-cd /mnt/c/Users/<you>/git\ azuze/motionity-2
-npm install
-npm run dist:linux
 ```
 
-Note that building on `/mnt/c` is slow. Copying the tree into the WSL
-filesystem (`~/motionity`) is several times faster.
+Those three refs must match `build.flatpak.runtimeVersion` / `baseVersion` in
+`package.json`; `build-release.ps1` reads them from there when it checks.
+
+To build inside the distro directly instead — no `-UseWsl`, and faster still,
+since `src/` is read locally too:
+
+```bash
+git clone <repo> ~/motionity && cd ~/motionity
+npm ci && npm run dist:linux
+```
+
+`wsl.exe` writes its own listings as UTF-16LE, which PowerShell 5.1 renders as
+NUL-interleaved text — `wsl -l -v` can look like it has one distro when it has
+two. `$env:WSL_UTF8 = "1"` fixes it.
 
 ## 2. Docker
 

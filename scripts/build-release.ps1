@@ -28,9 +28,19 @@
     Windows builds the .exe targets; AppImage and Flatpak need a Linux host or
     WSL (see PACKAGING.md). Nothing here cross-builds.
 
+    -UseWsl makes that split automatic: the .exe targets run on Windows, and the
+    Linux ones are handed to a WSL distro over /mnt/c, against this same worktree.
+    The npm install, the vendor step and the icon all happen once on the Windows
+    side and the WSL build reads them through the mount, so the artifacts still
+    land in dist/ and the checksum step below sees every one of them.
+
 .EXAMPLE
     ./scripts/build-release.ps1
     Build every target at v<package.json version>.
+
+.EXAMPLE
+    ./scripts/build-release.ps1 -UseWsl
+    Same, with AppImage and Flatpak built in the first non-docker WSL distro.
 
 .EXAMPLE
     ./scripts/build-release.ps1 -Targets win -Tag v1.1.0
@@ -39,6 +49,10 @@
 .EXAMPLE
     ./scripts/build-release.ps1 -Targets win,linux-appimage
     Windows installers plus the Linux AppImage — no Flatpak.
+
+.EXAMPLE
+    ./scripts/build-release.ps1 -Targets linux -UseWsl -WslDistro Ubuntu-24.04
+    Both Linux bundles, in a named distro.
 
 .EXAMPLE
     ./scripts/build-release.ps1 -SkipVendor -SkipDeps
@@ -61,6 +75,14 @@ param(
 
     # Skip the npm install even when node_modules is missing.
     [switch]$SkipDeps,
+
+    # Build the Linux targets inside WSL instead of warning that they cannot be
+    # built on Windows. Ignored on a Linux host, where they build natively.
+    [switch]$UseWsl,
+
+    # WSL distro to build in. Defaults to the first installed one that is not
+    # docker-desktop.
+    [string]$WslDistro,
 
     # Remove dist/ before building.
     [switch]$Clean
@@ -91,6 +113,153 @@ function Get-ArtifactName {
     return $Stem + '.${ext}'
 }
 
+# --- WSL plumbing -------------------------------------------------------------
+
+function Invoke-Wsl {
+    param([Parameter(Mandatory)][string]$Distro, [Parameter(Mandatory)][string]$Command)
+    Write-Host "  > wsl -d $Distro -- $Command" -ForegroundColor DarkGray
+    # bash -lc, so PATH matches an interactive shell: node installed through nvm
+    # or fnm is not on the default non-login PATH.
+    & wsl.exe -d $Distro -e bash -lc $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "the WSL build in '$Distro' failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Test-WslCommand {
+    param([Parameter(Mandatory)][string]$Distro, [Parameter(Mandatory)][string]$Command)
+    & wsl.exe -d $Distro -e bash -lc $Command *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function ConvertTo-BashArg {
+    <#
+        Single quotes, always. The artifactName arguments carry a literal ${ext}
+        for electron-builder to expand, and bash would expand it to nothing first
+        inside double quotes; the repo path has a space in it.
+    #>
+    param([Parameter(Mandatory)][string]$Value)
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function Get-WslDistro {
+    <#
+        docker-desktop is excluded on purpose. It is Docker Desktop's own LinuxKit
+        VM: no apt, no user home to install the flatpak runtimes into — and it is
+        usually the *default* distro, so picking blind would land there.
+    #>
+    param([string]$Requested)
+
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        throw "-UseWsl needs wsl.exe on PATH. Install a distro with 'wsl --install -d Ubuntu' (PACKAGING.md has the rest of the setup)."
+    }
+
+    # wsl.exe writes its own listings as UTF-16LE, which PowerShell 5.1 reads back
+    # as NUL-interleaved text. WSL_UTF8 fixes it at the source; the -replace is the
+    # fallback for WSL older than 0.64.
+    $previousUtf8 = $env:WSL_UTF8
+    $env:WSL_UTF8 = "1"
+    try     { $listed = (& wsl.exe --list --quiet) -join "`n" }
+    finally { $env:WSL_UTF8 = $previousUtf8 }
+
+    $distros = @(($listed -replace "`0", "") -split "`r?`n" |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+    if ($Requested) {
+        if ($distros -notcontains $Requested) {
+            throw "WSL distro '$Requested' is not installed. Installed: $($distros -join ', ')."
+        }
+        return $Requested
+    }
+
+    $usable = @($distros | Where-Object { $_ -notlike "docker-desktop*" })
+    if (-not $usable.Count) {
+        throw "no WSL distro that can build here (installed: $($distros -join ', ')). Run 'wsl --install -d Ubuntu', then the package setup in PACKAGING.md."
+    }
+    return $usable[0]
+}
+
+function Get-WslPath {
+    param([Parameter(Mandatory)][string]$Distro, [Parameter(Mandatory)][string]$WindowsPath)
+    # -e wslpath rather than a shell: the backslashes and the space in the repo
+    # path then reach wslpath as one literal argv entry, unquoted and unmangled.
+    $out = (& wsl.exe -d $Distro -e wslpath -a -u $WindowsPath)
+    $path = (@($out) -join "").Replace("`0", "").Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $path) {
+        throw "wslpath failed in '$Distro' for '$WindowsPath' — is the Windows drive mounted in that distro?"
+    }
+    return $path
+}
+
+function Get-WslStageDir {
+    <#
+        Where the Linux build actually happens. It cannot be dist/ on /mnt/c:
+        electron-builder chmods every file it unpacks out of the Electron zip, and
+        drvfs answers chmod with EPERM unless /mnt/c was mounted with the metadata
+        option — a global change to the distro needing sudo and a wsl --shutdown.
+
+          ⨯ EPERM: operation not permitted, chmod '.../linux-unpacked.tmp/locales/de.pak'
+
+        Staging in the distro's own filesystem and copying the finished bundles back
+        needs none of that, and is faster besides. Reading src/ over the mount is
+        still fine — nothing chmods the input.
+    #>
+    param([Parameter(Mandatory)][string]$Distro)
+    # printf, not echo: no trailing newline to trim off the path.
+    $out  = (& wsl.exe -d $Distro -e bash -lc 'printf %s "${XDG_CACHE_HOME:-$HOME/.cache}/motionity-build"')
+    $path = (@($out) -join "").Replace("`0", "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $path -notlike "/*") {
+        throw "could not resolve a staging directory in '$Distro' (got '$path')."
+    }
+    return $path
+}
+
+function Assert-WslBuildEnv {
+    <#
+        Fail before the build rather than during it. electron-builder's own error
+        for a missing flatpak ref is a bare flatpak-builder exit code that names
+        neither the ref nor the remote.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Distro,
+        [Parameter(Mandatory)][string[]]$WslTargets,
+        [Parameter(Mandatory)]$Pkg
+    )
+
+    if (-not (Test-WslCommand $Distro 'command -v node')) {
+        throw "no node in WSL distro '$Distro'. Inside it: sudo apt update && sudo apt install -y nodejs npm"
+    }
+
+    # AppImage needs nothing else: electron-builder downloads its own appimage
+    # tooling and writes the squashfs itself. libfuse2 is only needed to *run* the
+    # result, which is not this script's job.
+    if ($WslTargets -notcontains "linux-flatpak") { return }
+
+    if (-not (Test-WslCommand $Distro 'command -v flatpak-builder')) {
+        throw "no flatpak-builder in WSL distro '$Distro'. Inside it: sudo apt install -y flatpak flatpak-builder elfutils"
+    }
+
+    $runtimeVersion = $Pkg.build.flatpak.runtimeVersion
+    $baseVersion    = $Pkg.build.flatpak.baseVersion
+    if (-not $runtimeVersion) { $runtimeVersion = "23.08" }
+    if (-not $baseVersion)    { $baseVersion    = $runtimeVersion }
+
+    $refs = @(
+        "org.freedesktop.Platform//$runtimeVersion",
+        "org.freedesktop.Sdk//$runtimeVersion",
+        "org.electronjs.Electron2.BaseApp//$baseVersion"
+    )
+    $missing = @($refs | Where-Object { -not (Test-WslCommand $Distro "flatpak info $_") })
+    if ($missing.Count) {
+        throw @"
+flatpak refs missing in '$Distro': $($missing -join ', ')
+Inside the distro:
+  flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  flatpak install --user -y flathub $($refs -join ' ')
+"@
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
@@ -119,11 +288,37 @@ try {
     }
     $resolvedTargets = @($resolvedTargets | Select-Object -Unique)
 
-    # electron-builder produces AppImage and Flatpak with Linux-only tooling
-    # (appimagetool, flatpak-builder). Warned rather than blocked: the same script
-    # runs under pwsh on a Linux box or in WSL, which is where that target belongs.
-    if (($resolvedTargets -like "linux-*") -and $env:OS -eq "Windows_NT") {
-        Write-Warning "the Linux targets need a Linux host or WSL — electron-builder cannot produce AppImage or Flatpak on Windows (PACKAGING.md has the WSL setup)."
+    # electron-builder produces AppImage and Flatpak with Linux-only tooling (its
+    # downloaded appimage bundle, and flatpak-builder). -UseWsl hands those two
+    # targets to a WSL distro; without it they stay a warning rather than an error,
+    # because the other right answer is running this whole script under pwsh on a
+    # Linux box, where they build natively.
+    $onWindows  = ($env:OS -eq "Windows_NT")
+    $wslTargets = @($resolvedTargets | Where-Object { $_ -like "linux-*" })
+    $useWslHere = $onWindows -and $UseWsl -and [bool]$wslTargets.Count
+
+    if ($onWindows -and $wslTargets.Count -and -not $UseWsl) {
+        Write-Warning "the Linux targets need a Linux host or WSL — electron-builder cannot produce AppImage or Flatpak on Windows. Add -UseWsl to build them in a WSL distro (PACKAGING.md has the setup)."
+    }
+    if ($UseWsl -and -not $onWindows) {
+        Write-Warning "-UseWsl ignored: this is already a Linux host, so the Linux targets build natively."
+    }
+    if ($UseWsl -and $onWindows -and -not $wslTargets.Count) {
+        Write-Warning "-UseWsl ignored: no Linux target was requested (-Targets $($Targets -join ', '))."
+    }
+
+    $wslRepo  = $null
+    $wslStage = $null
+    if ($useWslHere) {
+        $WslDistro = Get-WslDistro -Requested $WslDistro
+        $wslRepo   = Get-WslPath -Distro $WslDistro -WindowsPath $repoRoot
+        $wslStage  = Get-WslStageDir -Distro $WslDistro
+        Write-Host "Linux targets go to WSL" -ForegroundColor Cyan
+        Write-Host "  distro  : $WslDistro"
+        Write-Host "  worktree: $wslRepo"
+        Write-Host "  staging : $wslStage (copied back into dist/)"
+        Assert-WslBuildEnv -Distro $WslDistro -WslTargets $wslTargets -Pkg $pkg
+        Write-Host ""
     }
 
     if ($Clean) {
@@ -207,7 +402,30 @@ try {
             }
         }
 
-        Invoke-Checked $builder $builderArgs
+        if ($useWslHere -and $target -like "linux-*") {
+            # `node cli.js` rather than node_modules/.bin/electron-builder: the
+            # extensionless shim npm writes on Windows is a sh script, and whether
+            # it is executable across the mount depends on the drvfs options.
+            #
+            # The output goes to the distro's filesystem (see Get-WslStageDir) and
+            # the bundles are copied back afterwards. `cp -f`, never `cp -p`:
+            # preserving modes means chmod, which is the EPERM this avoids.
+            #
+            # The rm clears this tag's previous bundles from the staging directory,
+            # so the copy back cannot pick up an artifact from an earlier build that
+            # electron-builder did not overwrite this time round.
+            $quotedArgs = @($builderArgs | ForEach-Object { ConvertTo-BashArg $_ }) -join " "
+            $stage      = ConvertTo-BashArg $wslStage
+            $wslCommand = "cd $(ConvertTo-BashArg $wslRepo)" +
+                          " && mkdir -p $stage" +
+                          " && rm -f $stage/$prefix-*" +
+                          " && USE_HARD_LINKS=false node node_modules/electron-builder/cli.js $quotedArgs $(ConvertTo-BashArg "-c.directories.output=$wslStage")" +
+                          " && cp -f $stage/$prefix-* $(ConvertTo-BashArg "$wslRepo/dist")/"
+            Invoke-Wsl -Distro $WslDistro -Command $wslCommand
+        }
+        else {
+            Invoke-Checked $builder $builderArgs
+        }
         Write-Host ""
     }
 
