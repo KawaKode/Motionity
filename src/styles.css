@@ -7,6 +7,14 @@
   --input-color: #22233e;
   --accent-color: #166ef1;
   --button-hover: #262746;
+  /* Panel geometry. Every rule that used to hardcode 76/299/300/375 derives
+     from these so the resize handles only have to move one number each.
+     --layers-w tracks --rail-w + --browser-w while the library panel is
+     visible, but stays put when it is hidden so the layer names keep room. */
+  --rail-w: 76px;
+  --browser-w: 299px;
+  --props-w: 300px;
+  --layers-w: 375px;
 }
 /*
 :root {
@@ -41,7 +49,7 @@ body {
   font-size: 14px;
   font-weight: 600;
   background: var(--panel-back);
-  width: 76px;
+  width: var(--rail-w);
   border-right: 1px solid var(--panel-stroke);
   box-sizing: border-box;
 }
@@ -244,7 +252,7 @@ body {
 #toolbar {
   position: absolute;
   height: calc(100% - 340px);
-  width: 76px;
+  width: var(--rail-w);
   background-color: var(--panel-back);
   border-right: 1px solid var(--panel-stroke);
   left: 0px;
@@ -308,8 +316,8 @@ body {
 #behind-browser {
   position: absolute;
   height: 100%;
-  width: 299px;
-  left: 76px;
+  width: var(--browser-w);
+  left: var(--rail-w);
   background: var(--panel-back);
   border-right: 1px solid var(--panel-stroke);
   z-index: 1;
@@ -318,10 +326,10 @@ body {
 #browser {
   position: absolute;
   height: calc(100% - 450px);
-  width: 299px;
+  width: var(--browser-w);
   background-color: var(--panel-back);
   border-right: 1px solid var(--panel-stroke);
-  left: 76px;
+  left: var(--rail-w);
   top: 110px;
   box-sizing: border-box;
   z-index: 999999;
@@ -333,7 +341,7 @@ body {
   display: none !important;
 }
 #browser-container {
-  width: 260px;
+  width: calc(var(--browser-w) - 39px);
   margin-left: auto;
   margin-right: auto;
   height: 100%;
@@ -359,7 +367,7 @@ body {
 }
 .image-grid-item,
 .video-grid-item {
-  width: 120px;
+  width: 100%;
   margin-bottom: 15px;
   position: relative;
 }
@@ -388,7 +396,7 @@ body {
   text-align: right;
   text-decoration: none;
   text-shadow: 0px 1px 5px #000000;
-  width: 110px;
+  width: calc(100% - 10px);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -436,7 +444,9 @@ body {
   grid-gap: 15px;
   width: 100%;
   grid-auto-columns: auto;
-  grid-template-columns: 52px 52px 52px 52px;
+  /* Column count follows the panel width so the grid reflows when the library
+     is resized instead of overflowing a fixed four-column track. */
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
   overflow: hidden;
 }
 .scroll-row:before {
@@ -461,7 +471,7 @@ body {
 #search-fixed {
   position: fixed;
   top: 0px;
-  width: 279px;
+  width: calc(var(--browser-w) - 20px);
   padding-left: 19px;
   margin-left: -19px;
   z-index: 999999;
@@ -776,12 +786,13 @@ body {
   position: absolute;
   right: 0px;
   top: 0px;
-  width: 300px;
+  width: var(--props-w);
   height: calc(100% - 340px);
   background-color: var(--panel-back);
   border-left: 1px solid var(--panel-stroke);
   z-index: 999;
   overflow-y: overlay;
+  overflow-x: hidden;
 }
 #properties-overlay {
   width: 100%;
@@ -830,9 +841,12 @@ hr {
   background-color: var(--panel-stroke);
   margin-bottom: 20px;
 }
+#properties hr {
+  width: calc(var(--props-w) - 40px);
+}
 /* Property sections */
 .panel-section {
-  width: 260px;
+  width: calc(var(--props-w) - 40px);
   margin-left: auto;
   margin-right: auto;
 }
@@ -869,7 +883,16 @@ th {
   width: 189px;
   display: flex;
   align-items: center;
+  /* Keeps the inputs against the right edge once the column can be wider
+     than its contents */
+  justify-content: flex-end;
   margin-left: auto;
+}
+/* Inside the properties panel the value column follows the panel width, so
+   dropdowns and sliders grow when the panel is widened. 111px is the label
+   column plus the panel gutters. The filters popup keeps the fixed width. */
+#properties .value-col {
+  width: calc(var(--props-w) - 111px);
 }
 /* Dropdows */
 .nice-select,
@@ -1550,15 +1573,11 @@ label span {
 #canvas-area {
   position: absolute;
   top: 0px;
-  left: 375px;
+  left: calc(var(--rail-w) + var(--browser-w));
   height: calc(100% - 342px);
-  width: calc(100% - 675px);
+  width: calc(100% - var(--rail-w) - var(--browser-w) - var(--props-w));
   box-sizing: border-box;
   overflow: hidden;
-}
-.canvas-full {
-  left: 76px !important;
-  width: calc(100% - 376px) !important;
 }
 .canvas-container {
   left: 0px;
@@ -1614,7 +1633,7 @@ canvas {
 #layer-list {
   position: absolute;
   height: 245px;
-  width: 375px;
+  width: var(--layers-w);
   left: 0px;
   bottom: 60px;
   background-color: var(--panel-back);
@@ -1816,7 +1835,7 @@ layer:nth-child(even) .properties {
   color: var(--secondary-text-color);
   line-height: 40px;
   height: 40px;
-  width: 375px;
+  width: var(--layers-w);
   position: fixed;
   margin-top: -35px;
   background-color: var(--panel-back);
@@ -1840,10 +1859,10 @@ layer:nth-child(even) .properties {
 #timearea {
   position: absolute;
   bottom: 60px;
-  left: 375px;
+  left: var(--layers-w);
   height: 245px;
   background-color: var(--main-back);
-  width: calc(100% - 375px);
+  width: calc(100% - var(--layers-w));
   border-top: 1px solid var(--panel-stroke);
   z-index: 999;
 }
@@ -1858,10 +1877,108 @@ layer:nth-child(even) .properties {
   cursor: ns-resize;
   background-color: var(--panel-stroke);
 }
+/* Side panel resize handles. Each one straddles the border between a side
+   panel and the canvas, and carries the hide/show button for that panel.
+   Their height is kept in sync with the panels by resetHeight(). */
+.panel-handle {
+  position: absolute;
+  top: 0px;
+  height: calc(100% - 340px);
+  width: 7px;
+  z-index: 9999999;
+  box-sizing: border-box;
+  touch-action: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#browser-handle {
+  left: calc(var(--rail-w) + var(--browser-w) - 3px);
+}
+#properties-handle {
+  right: calc(var(--props-w) - 3px);
+}
+#properties-handle.panel-hidden {
+  right: 0px;
+}
+.panel-handle:not(.panel-hidden):hover,
+.panel-handle.handle-dragging {
+  cursor: ew-resize;
+}
+.panel-handle:before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0px;
+  width: 2px;
+  height: 100%;
+  background-color: var(--accent-color);
+  opacity: 0;
+}
+.panel-handle:not(.panel-hidden):hover:before,
+.panel-handle.handle-dragging:before {
+  opacity: 1;
+}
+.panel-toggle {
+  position: absolute;
+  top: 50%;
+  margin-top: -18px;
+  width: 18px;
+  height: 36px;
+  background-color: var(--input-color);
+  border: 1px solid var(--panel-stroke);
+  box-sizing: border-box;
+  /* Always on screen, dimmed. Revealing it on hover meant having to find the
+     3px resize line first, then travel onto the button. */
+  opacity: 0.4;
+}
+.panel-toggle:hover {
+  cursor: pointer;
+  background-color: var(--button-hover);
+}
+.panel-toggle:hover,
+.panel-handle:hover .panel-toggle,
+.panel-handle.handle-dragging .panel-toggle,
+.panel-handle.panel-hidden .panel-toggle {
+  opacity: 1;
+}
+/* Chevron, pointing at the edge the panel would collapse towards */
+.panel-toggle:after {
+  content: "";
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  top: 50%;
+  left: 50%;
+  border-left: 1.5px solid var(--secondary-text-color);
+  border-bottom: 1.5px solid var(--secondary-text-color);
+}
+#browser-handle .panel-toggle {
+  left: 5px;
+  border-radius: 0px 4px 4px 0px;
+}
+#properties-handle .panel-toggle {
+  right: 5px;
+  border-radius: 4px 0px 0px 4px;
+}
+#properties-handle.panel-hidden .panel-toggle {
+  right: 4px;
+}
+#browser-handle .panel-toggle:after,
+#properties-handle.panel-hidden .panel-toggle:after {
+  margin: -4px 0px 0px -2px;
+  transform: rotate(45deg);
+}
+#properties-handle .panel-toggle:after,
+#browser-handle.panel-hidden .panel-toggle:after {
+  margin: -4px 0px 0px -5px;
+  transform: rotate(-135deg);
+}
 #seekarea {
   height: 100%;
   z-index: 99999;
-  width: calc(100% - 375px);
+  /* Fixed positioning - the percentage is the viewport, not #timearea. */
+  width: calc(100% - var(--layers-w));
   overflow-x: auto;
   overflow-y: hidden;
   position: fixed;

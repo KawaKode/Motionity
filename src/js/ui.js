@@ -570,7 +570,7 @@ function updatePanelValues() {
     o_slider.setValue(object.get('opacity') * 100);
     if (object.get('type') == 'rect') {
       $('#object-corners input').val(
-        parseFloat(object.get('rx').toFixed(2))
+        parseFloat(getCornerRadius(object).toFixed(2))
       );
       colormode = 'fill';
       o_fill.setColor(object.get('fill'));
@@ -1219,12 +1219,13 @@ $(document).on(
 
 // Switch tool
 function switchTool(e) {
-  $('#browser').removeClass('collapsed');
-  $('#canvas-area').removeClass('canvas-full');
   if ($(this).attr('id') == 'more-tool') {
     showMore();
     return false;
   }
+  $('#browser').removeClass('collapsed');
+  $('#behind-browser').removeClass('collapsed');
+  applyPanelWidths();
   resizeCanvas();
   var act = $('.tool-active');
   if (act.attr('id') == 'image-tool') {
@@ -1292,6 +1293,10 @@ function dragObject(e) {
   if (e.which == 3) {
     return false;
   }
+  // Measure before the clone leaves the panel - panel items are sized in
+  // percentages of a resizable panel, so a clone parented to <body> would
+  // report the body width instead.
+  var sourcewidth = $(this).width();
   var drag = $(this).clone();
   drag.css({
     background: 'transparent',
@@ -1304,7 +1309,7 @@ function dragObject(e) {
     zIndex: 9999999,
     left: $(this).offset().left,
     top: $(this).offset().top,
-    width: canvas.getZoom() * drag.width(),
+    width: canvas.getZoom() * sourcewidth,
     pointerEvents: 'none',
     opacity: 0,
   });
@@ -1619,10 +1624,13 @@ $(document).on(
 
 // Collapse library
 function collapsePanel() {
+  var act = $('.tool-active');
+  if (act.length > 0) {
+    // Remembered so the handle button can reopen the same tab
+    lasttool = act.attr('id');
+  }
   $('#browser').addClass('collapsed');
   $('#behind-browser').addClass('collapsed');
-  $('#canvas-area').addClass('canvas-full');
-  var act = $('.tool-active');
   if (act.attr('id') == 'image-tool') {
     act.find('img').attr('src', 'assets/image.svg');
   } else if (act.attr('id') == 'text-tool') {
@@ -1637,6 +1645,7 @@ function collapsePanel() {
     act.find('img').attr('src', 'assets/uploads.svg');
   }
   $('.tool-active').removeClass('tool-active');
+  applyPanelWidths();
   resizeCanvas();
 }
 $(document).on('click', '#collapse', collapsePanel);
