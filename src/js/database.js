@@ -53,6 +53,8 @@ function checkDB() {
           'cornerRadius',
           'selectable',
           'hasControls',
+          'hasBorders',
+          'evented',
           'subTargetCheck',
           'id',
           'hoverCursor',
@@ -230,6 +232,8 @@ async function autoSave() {
       'cornerRadius',
       'selectable',
       'hasControls',
+      'hasBorders',
+      'evented',
       'subTargetCheck',
       'id',
       'hoverCursor',
@@ -348,6 +352,13 @@ function loadProject() {
             });
             replaceSource(canvas.getItemById(object.id), canvas);
           } else {
+            // Projects saved before audio layers were flagged still carry
+            // controls / borders, which show up as a phantom box at 0,0.
+            canvas.getItemById(object.id).set({
+              hasControls: false,
+              hasBorders: false,
+              evented: false,
+            });
             renderProp('volume', canvas.getItemById(object.id));
           }
         });

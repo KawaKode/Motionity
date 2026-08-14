@@ -4381,6 +4381,11 @@ function newAudioLayer(src) {
       duration: audio.duration * 1000,
       opacity: 0,
       selectable: false,
+      // Audio layers are invisible placeholders. Selecting them (from the
+      // layer list) must not paint controls / a bounding box on the canvas.
+      hasControls: false,
+      hasBorders: false,
+      evented: false,
       volume: 0.5,
       assetType: 'audio',
       shadow: {
@@ -5367,6 +5372,10 @@ function resetHeight() {
     'calc(100% - ' + (top + 97) + 'px)'
   );
   $('#properties').css('height', 'calc(100% - ' + (top + 97) + 'px)');
+  $('.panel-handle').css(
+    'height',
+    'calc(100% - ' + (top + 97) + 'px)'
+  );
   $('#timeline-handle').css('bottom', top + 95);
   resizeCanvas();
 }
@@ -5398,6 +5407,208 @@ function dragTimeline(e) {
 $(document).on('pointerdown', '#timeline-handle', dragTimeline);
 
 oldtimelinepos = $(window).height() - 92 - $('#timearea').height();
+
+// Side panels: horizontal resize and hide/show
+// The widths live as CSS variables on :root - every panel rule is a calc() of
+// them, so moving a handle only has to write one number.
+const RAIL_WIDTH = 76;
+const BROWSER_MIN_WIDTH = 210;
+const BROWSER_MAX_WIDTH = 640;
+const PROPS_MIN_WIDTH = 300;
+const PROPS_MAX_WIDTH = 640;
+// Canvas width kept free while dragging, whatever the window size
+const CANVAS_MIN_WIDTH = 240;
+const PANEL_LAYOUT_KEY = 'motionity-panel-layout';
+
+var browserwidth = 299;
+var propswidth = 300;
+var propshidden = false;
+// Tool to reopen the library with, set when it gets collapsed
+var lasttool = $('.tool-active').attr('id') || 'shape-tool';
+
+function clampWidth(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function browserHidden() {
+  return $('#browser').hasClass('collapsed');
+}
+
+function applyPanelWidths() {
+  const root = document.documentElement.style;
+  const hidden = browserHidden();
+  var browser = hidden ? 0 : browserwidth;
+  var properties = propshidden ? 0 : propswidth;
+  // Shrink to fit rather than squeeze the canvas out of a narrow window. The
+  // stored widths are left alone, so the panels grow back on a wider one.
+  var over =
+    RAIL_WIDTH +
+    browser +
+    properties +
+    CANVAS_MIN_WIDTH -
+    $(window).width();
+  if (over > 0 && properties > PROPS_MIN_WIDTH) {
+    const cut = Math.min(over, properties - PROPS_MIN_WIDTH);
+    properties -= cut;
+    over -= cut;
+  }
+  if (over > 0 && browser > BROWSER_MIN_WIDTH) {
+    browser -= Math.min(over, browser - BROWSER_MIN_WIDTH);
+  }
+  root.setProperty('--browser-w', browser + 'px');
+  root.setProperty('--props-w', properties + 'px');
+  // The layer list and the timeline keep their column width while the library
+  // is hidden, otherwise layer names would get squashed into the tool rail.
+  if (!hidden) {
+    root.setProperty('--layers-w', RAIL_WIDTH + browser + 'px');
+  }
+  $('#browser-handle').toggleClass('panel-hidden', hidden);
+  $('#properties-handle').toggleClass('panel-hidden', propshidden);
+  $('#properties').toggleClass('collapsed', propshidden);
+  $('#browser-toggle').attr(
+    'title',
+    hidden ? 'Show the library' : 'Hide the library'
+  );
+  $('#properties-toggle').attr(
+    'title',
+    propshidden ? 'Show the properties' : 'Hide the properties'
+  );
+}
+
+function savePanelLayout() {
+  try {
+    localStorage.setItem(
+      PANEL_LAYOUT_KEY,
+      JSON.stringify({
+        browser: browserwidth,
+        properties: propswidth,
+        propertieshidden: propshidden,
+      })
+    );
+  } catch (err) {
+    // Private browsing or a full quota - the layout just won't persist
+  }
+}
+
+function restorePanelLayout() {
+  var stored;
+  try {
+    stored = JSON.parse(localStorage.getItem(PANEL_LAYOUT_KEY));
+  } catch (err) {
+    stored = null;
+  }
+  if (stored) {
+    if (typeof stored.browser == 'number') {
+      browserwidth = clampWidth(
+        stored.browser,
+        BROWSER_MIN_WIDTH,
+        BROWSER_MAX_WIDTH
+      );
+    }
+    if (typeof stored.properties == 'number') {
+      propswidth = clampWidth(
+        stored.properties,
+        PROPS_MIN_WIDTH,
+        PROPS_MAX_WIDTH
+      );
+    }
+    propshidden = stored.propertieshidden === true;
+  }
+  applyPanelWidths();
+}
+
+// Dragging a side panel border
+function dragPanel(e) {
+  if (e.which == 3 || modalOpen() || $(this).hasClass('panel-hidden')) {
+    return false;
+  }
+  e.preventDefault();
+  const handle = $(this);
+  const isbrowser = handle.attr('id') == 'browser-handle';
+  const startx = e.pageX;
+  const startwidth = isbrowser ? browserwidth : propswidth;
+  // Suppress text selection for the duration of the drag only
+  const previousSelectStart = document.onselectstart;
+  document.onselectstart = function () {
+    return false;
+  };
+  handle.addClass('handle-dragging');
+
+  function draggingPanelBorder(ev) {
+    // The properties panel is anchored to the right, so its width grows the
+    // other way round
+    const delta = isbrowser ? ev.pageX - startx : startx - ev.pageX;
+    const otherwidth = isbrowser
+      ? propshidden
+        ? 0
+        : propswidth
+      : browserHidden()
+      ? 0
+      : browserwidth;
+    const room =
+      $(window).width() - RAIL_WIDTH - CANVAS_MIN_WIDTH - otherwidth;
+    if (isbrowser) {
+      browserwidth = clampWidth(
+        startwidth + delta,
+        BROWSER_MIN_WIDTH,
+        Math.min(BROWSER_MAX_WIDTH, room)
+      );
+    } else {
+      propswidth = clampWidth(
+        startwidth + delta,
+        PROPS_MIN_WIDTH,
+        Math.min(PROPS_MAX_WIDTH, room)
+      );
+    }
+    applyPanelWidths();
+    resizeCanvas();
+  }
+  function releasedPanelBorder() {
+    document.onselectstart = previousSelectStart || null;
+    handle.removeClass('handle-dragging');
+    savePanelLayout();
+  }
+  bindPointerDrag(e, this, draggingPanelBorder, releasedPanelBorder);
+}
+$(document).on('pointerdown', '.panel-handle', dragPanel);
+
+// Keep a click on a hide/show button from starting a resize drag
+$(document).on('pointerdown', '.panel-toggle', function (e) {
+  e.stopPropagation();
+});
+
+$(document).on('click', '#browser-toggle', function (e) {
+  e.stopPropagation();
+  if (browserHidden()) {
+    // Reopening goes through the tool click so the rail icons stay in sync
+    $('#' + lasttool).trigger('click');
+  } else {
+    collapsePanel();
+  }
+});
+
+$(document).on('click', '#properties-toggle', function (e) {
+  e.stopPropagation();
+  propshidden = !propshidden;
+  applyPanelWidths();
+  savePanelLayout();
+  resizeCanvas();
+});
+
+// Re-fits the panels after the window itself changed size. Runs after the
+// resizeCanvas listener registered at the top of this file, so the canvas is
+// measured again once the new widths are in.
+window.addEventListener(
+  'resize',
+  function () {
+    applyPanelWidths();
+    resizeCanvas();
+  },
+  false
+);
+
+restorePanelLayout();
+resizeCanvas();
 
 // Sync scrolling (vertical)
 function syncScroll(el1, el2) {
