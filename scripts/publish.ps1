@@ -451,6 +451,51 @@ curl --config "$cfg" --write-out '  http %{http_code}, %{size_upload} bytes uplo
     }
 }
 
+function Get-ReleaseBody {
+    <#
+        The markdown shown on the Gitea release page: how to run each artifact.
+
+        A literal here-string, because an expandable one treats ``` as backtick
+        escapes and the third one would swallow the newline as a line continuation.
+        The two placeholders are substituted afterwards instead, and the content sits
+        at column 0 because four leading spaces would make markdown read it as code.
+    #>
+    param([Parameter(Mandatory)][string]$Tag)
+
+    $body = @'
+## Linux
+
+### AppImage
+
+Make it executable: `chmod +x motionity-%TAG%-linux-x86_64.AppImage`, then launch it (needs `libfuse2` installed).
+
+### Flatpak
+
+```
+flatpak install ./motionity-%TAG%-linux-x86_64.flatpak
+```
+
+## Windows
+
+Launch the installer or the portable version directly. A SmartScreen warning may appear, as the binary is not signed.
+
+## Docker
+
+Recommended: `docker-compose.yml`
+
+```yaml
+services:
+  motionity:
+    image: %IMAGE%:%TAG%
+    ports:
+      - 8080:8080
+    restart: unless-stopped
+```
+'@
+
+    return $body.Replace("%IMAGE%", "$Registry/$Owner/$Image").Replace("%TAG%", $Tag)
+}
+
 function Publish-BinaryRelease {
     <#
         Attach the installers to the release for $Tag, creating that release if it
@@ -489,7 +534,7 @@ function Publish-BinaryRelease {
         $release = Invoke-GiteaApi -Method POST -Uri $releasesUri -Token $Token -Body @{
             tag_name = $Tag
             name     = "Motionity $Tag"
-            body     = "Desktop installers — Windows NSIS + portable, Linux AppImage + Flatpak — with SHA256SUMS.txt. Container image: ${Registry}/${Owner}/${Image}:$Tag"
+            body     = (Get-ReleaseBody -Tag $Tag)
             draft    = $false
         }
         if (-not $release) { throw "could not create release $Tag in $RepoPath (does the repo exist?)." }
