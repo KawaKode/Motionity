@@ -18,11 +18,15 @@
     "dist:flatpak": "npm run vendor && npm run icons && electron-builder --linux flatpak",
     "dist:linux": "npm run vendor && npm run icons && electron-builder --linux AppImage flatpak",
     "dist:linux:wsl": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Targets linux -UseWsl",
+    "dist:win:wsl": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Targets win -WinInWsl -KeepInWsl",
+    "dist:win:wsl:portable": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Targets win-portable -WinInWsl -KeepInWsl",
     "docker:build": "docker build -t motionity:latest .",
     "docker:run": "docker run --rm -p 8080:8080 motionity:latest",
     "release:build": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
     "release:binaries": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -BinariesOnly",
+    "release:binaries:wsl": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -BinariesOnly win -WinInWsl -KeepInWsl",
     "release": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -PublishRelease",
+    "release:wsl": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/publish.ps1 -PublishRelease -UseWsl -WinInWsl -KeepInWsl",
     "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {

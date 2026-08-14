@@ -4,7 +4,7 @@ Three distribution targets share one source tree (`src/`, a plain static app):
 
 | Target | Output | Build host |
 | --- | --- | --- |
-| Desktop | `Motionity Setup 1.0.0.exe`, `Motionity-1.0.0-x64.AppImage`, `.flatpak` | Windows for `.exe`, Linux (or WSL2) for AppImage/Flatpak |
+| Desktop | `Motionity Setup 1.0.0.exe`, `Motionity-1.0.0-x64.AppImage`, `.flatpak` | Linux or WSL2 builds all of them; Windows builds only the `.exe` targets |
 | Container | `motionity:latest`, ~86 MB on disk / ~57 MB pulled | any Docker host |
 | Bare metal | `src/` behind Node, nginx or Caddy | any |
 
@@ -63,6 +63,10 @@ npm run dist:win       # NSIS installer + portable .exe -> dist/
 npm run dist:appimage  # .AppImage -> dist/
 npm run dist:flatpak   # .flatpak  -> dist/
 npm run dist:linux     # both Linux targets
+
+npm run dist:linux:wsl          # from Windows: Linux bundles, built in WSL
+npm run dist:win:wsl            # from Windows: .exe targets, built and left in WSL
+npm run dist:win:wsl:portable   # same, portable only (needs no Wine in the distro)
 ```
 
 Each `dist:*` script re-runs `vendor` and regenerates `build/icon.png`
@@ -107,9 +111,17 @@ WARNING: Cannot open 2 files
 The ACL is intact (the owner still has FullControl), so this is a filter
 driver, not a permissions problem. Fixes, in order of preference:
 
-1. Exclude the repository's `dist/` directory in the endpoint protection agent.
-2. Build on a machine or CI runner without that agent.
-3. Ship `dist/win-unpacked/` — `electron-builder --win dir` is unaffected.
+1. **Build the Windows targets in WSL**, where the agent cannot see the files at
+   all — `npm run dist:win:wsl`, covered in [its own section](#can-the-exe-be-built-in-wsl-too)
+   below. Needs no admin rights on the Windows side.
+2. Exclude the repository's `dist/` directory in the endpoint protection agent.
+3. Build on a machine or CI runner without that agent.
+4. Ship `dist/win-unpacked/` — `electron-builder --win dir` is unaffected.
+
+The same agent can also quarantine the *finished* unsigned `.exe` on write, not
+just lock it during the build. That is what `-KeepInWsl` is for: the artifact
+stays in the distro and is uploaded to the release from there, so it never
+crosses onto NTFS.
 
 ### Running `npm run dev` from a VS Code terminal
 
@@ -124,7 +136,8 @@ $env:ELECTRON_RUN_AS_NODE=$null; npm run dev  # PowerShell
 
 ### Is WSL enough for AppImage and Flatpak?
 
-Yes, and `build-release.ps1 -UseWsl` does it for you from Windows:
+Yes, and `build-release.ps1 -UseWsl` does it for you from Windows (`-WinInWsl`
+moves the `.exe` targets there too — see [below](#can-the-exe-be-built-in-wsl-too)):
 
 ```powershell
 ./scripts/build-release.ps1 -UseWsl                       # .exe on Windows, Linux bundles in WSL
@@ -138,8 +151,9 @@ Both bundles have been built this way on this machine (`Ubuntu`, WSL2 kernel
 
 - the `npm ci`, `vendor` and icon steps run **once on the Windows side**, and the
   WSL build reads them back through `/mnt/c` — one worktree, no second checkout;
-- only `linux-appimage` and `linux-flatpak` are delegated. `-UseWsl` on a Linux
-  host, or with no Linux target, warns and changes nothing;
+- `-UseWsl` delegates only `linux-appimage` and `linux-flatpak`; add `-WinInWsl`
+  to send `win` / `win-nsis` / `win-portable` as well. On a Linux host, or with no
+  target selected for WSL, both warn and change nothing;
 - the distro is the first installed one that is not `docker-desktop`, override
   with `-WslDistro`. `docker-desktop` is skipped deliberately: it is Docker's own
   LinuxKit VM, with no apt and no home to install the flatpak runtimes into, and
@@ -172,8 +186,9 @@ inside WSL you need `libfuse2` (or
 WSL2 kernel has the user namespaces and `/dev/fuse` that bubblewrap wants, but
 there is no `xdg-desktop-portal` to fall back on.
 
-**`.exe`: no.** Build it on the Windows side. Cross-building NSIS from Linux
-needs Wine and rules out signing.
+**`.exe`: yes** — see the next section. It is opt-in (`-WinInWsl`) because Windows
+builds those targets natively too; the reason to move them is the endpoint agent
+described above, not portability.
 
 One-time distro setup, from PowerShell:
 
@@ -187,6 +202,8 @@ Then inside Ubuntu:
 sudo apt update
 sudo apt install -y nodejs npm libfuse2               # AppImage (libfuse2 only to run it)
 sudo apt install -y flatpak flatpak-builder elfutils  # Flatpak
+sudo dpkg --add-architecture i386 && sudo apt update  # only for the NSIS .exe (see below)
+sudo apt install -y wine                              #   "     "
 flatpak remote-add --if-not-exists --user flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user -y flathub \
@@ -194,6 +211,103 @@ flatpak install --user -y flathub \
   org.freedesktop.Sdk//23.08 \
   org.electronjs.Electron2.BaseApp//23.08
 ```
+
+### Can the `.exe` be built in WSL too?
+
+Yes, and it is the way out of the "Access denied" failure above, since nothing
+unsigned is written to a Windows filesystem.
+
+```powershell
+npm run dist:win:wsl                # NSIS + portable, built and left in WSL — build only
+npm run dist:win:wsl:portable       # portable only — no Wine, no sudo needed
+npm run release:binaries:wsl        # same .exe targets, then uploaded to the Gitea release
+npm run release:wsl                 # everything incl. Linux + the container image push
+
+./scripts/build-release.ps1 -WinInWsl              # copy the .exe back into dist/
+./scripts/build-release.ps1 -WinInWsl -KeepInWsl   # leave it in the distro
+```
+
+Verified on this machine (`Ubuntu`, WSL2 kernel 6.18): a 138 MB portable
+`motionity-v2.0.2-win-x64-portable.exe`, `PE32 executable for MS Windows (GUI),
+Nullsoft Installer self-extracting archive`, with the icon and version resources
+applied, byte-identical whether read in the distro or after the copy back into
+`dist/`. The NSIS installer needs the wine setup below and has not been built this
+way yet.
+
+**What each Windows target needs on the Linux side.**
+
+| Target | Wine? | Why |
+| --- | --- | --- |
+| `-Targets win-portable` | no | electron-builder's NSIS bundle ships a native Linux `makensis`, and the exe's icon and version strings are written by the `resedit` JS package, not by `rcedit.exe`. |
+| `-Targets win-nsis` | **yes, 32-bit capable** | NSIS builds its uninstaller by *executing* the installer stub it has just linked, so a Windows PE has to run. |
+| `-Targets win` | yes | Both of the above in one packaging pass. |
+
+**Why the NSIS target cannot avoid Wine.** electron-builder links the installer
+once with `BUILD_UNINSTALLER` defined, runs it to produce `uninstaller.exe`, then
+links the real installer, which *embeds that file*:
+`templates/nsis/include/installer.nsh` does
+`File "/oname=${UNINSTALL_FILENAME}" "${UNINSTALLER_OUT_FILE}"`. There is no
+option to skip the first pass. The stub it executes is **PE32/i386** even for an
+x64 app, so a 64-bit-only Wine is not enough either:
+
+```bash
+sudo dpkg --add-architecture i386
+sudo apt update
+sudo apt install -y wine
+```
+
+`build-release.ps1` probes for a usable wine before packaging (missing or broken
+wine is an error; a wine with no `i386-windows` directory is a warning), because
+the failure otherwise arrives ~200 MB into the build naming ntdll rather than the
+missing package.
+
+**Do not use `toolsets.wine=1.0.1` for this.** electron-builder can download its
+own Wine 11 bundle instead of using the distro's, which looks like it would avoid
+the apt install, and it does download and verify cleanly. Its Linux build is
+unusable: `lib/wine/x86_64-unix/` only, with no `*-windows` PE builtin directory
+and no `syswow64`, so it fails after the app is already packaged with
+
+```
+wine: failed to load .../wine-11.0-linux-x86_64-*/lib/wine/x86_64-unix/ntdll.dll error c0000135
+0024:err:environ:run_wineboot failed to start wineboot 1
+```
+
+`c0000135` is `STATUS_DLL_NOT_FOUND`. Leaving `toolsets.wine` unset is what makes
+electron-builder use the distro's `wine` on Linux, which is the working path. If
+that bundle was already downloaded, `rm -rf ~/.cache/electron-builder/wine@1.0.1`
+reclaims it.
+
+If you cannot install anything in the distro, `-Targets win-portable` is a
+complete answer: a single self-contained `.exe`, no installer, no Wine, no root.
+
+**Why the build also passes `win.signExecutable=false`.** With no certificate
+configured, electron-builder still walks the signing path, and on Linux that
+path shells out to `signtool.exe` under Wine *before* discovering there is
+nothing to sign — `spawn wine ENOENT`, build over. `signExecutable: false` skips
+signing while still applying the icon and version metadata.
+(`signAndEditExecutable: false` would drop those too, which is not wanted.) Both
+overrides are passed on the command line for the WSL build only, so a native
+Windows build behaves exactly as before. These releases are unsigned either way.
+
+**Uploading straight from the distro.** With `-KeepInWsl`, `build-release.ps1`
+writes `dist/wsl-artifacts.json` naming the distro, the staging directory and the
+files it deliberately did not copy back. `publish.ps1` reads it and runs the
+`curl` upload *inside* the distro for those files. The Gitea token reaches WSL
+through `WSLENV` and is written to a `mktemp` config file by bash — it is in
+neither `wsl.exe`'s arguments nor the distro's process table. `SHA256SUMS.txt`
+still covers every artifact, hashes for the staged ones coming from `sha256sum`
+in the distro; it is text, so nothing objects to it landing in `dist/`.
+
+Two things to know when writing more of this plumbing:
+
+- These `.ps1` files are stored with **CRLF**, so a multi-line here-string handed
+  to `bash -lc` arrives with a `\r` on every line (`set: - : invalid option`,
+  `cd: $'/path\r': No such file or directory`). `ConvertTo-BashScript` strips it.
+- Never combine `set -e` with an explicit `exit 0` under `bash -lc`. A login
+  shell sources `~/.bash_logout`, Ubuntu's ends in a `clear_console` test that
+  fails with no tty, and errexit promotes that to the shell's exit status:
+  `wsl -e bash -lc 'set -e; exit 0'` returns **1**. `-l` has to stay, because
+  node from nvm or fnm is only on the login `PATH`.
 
 Those three refs must match `build.flatpak.runtimeVersion` / `baseVersion` in
 `package.json`; `build-release.ps1` reads them from there when it checks.

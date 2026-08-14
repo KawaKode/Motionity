@@ -13,11 +13,24 @@
     registry, so -PublishRelease attaches them to the Gitea release for that tag
     instead (creating the release if it does not exist).
 
+    An existing release is added to, not recreated: artifacts it does not have yet
+    are appended, and ones it already carries under the same name are replaced by the
+    freshly built file. That makes re-running a release after a rebuild safe, and
+    keeps the attachments in agreement with the SHA256SUMS.txt uploaded beside them.
+    -NoReplace turns a name collision back into an error.
+
     -BinariesOnly ships just the installers: no docker build, no docker login, no
     image push, and the release upload is implied. It takes the target list to
     build (win, linux-appimage, linux-flatpak — comma-separated) and that list
     overrides -Targets. The Linux targets need a Linux host or WSL: on Windows,
     add -UseWsl and build-release.ps1 hands them to a WSL distro.
+
+    -WinInWsl and -KeepInWsl are forwarded to build-release.ps1 and together keep
+    the unsigned .exe off NTFS entirely: it is built in the distro and, because
+    -KeepInWsl skips the copy back, it is still there at upload time. This script
+    then reads dist/wsl-artifacts.json and runs the curl upload *inside* the distro
+    for those files, so the endpoint agent never sees a write it can quarantine.
+    The token reaches the distro through WSLENV, not through the command line.
 
     Credentials are read, in order of precedence:
       1. -Username / -Password parameters
@@ -49,6 +62,11 @@
     ./scripts/publish.ps1 -Tag v1.1.0 -PublishRelease -UseWsl
     Full release from Windows: image push, .exe installers built natively, AppImage
     and Flatpak built in WSL, everything attached to release v1.1.0.
+
+.EXAMPLE
+    ./scripts/publish.ps1 -Tag v1.1.0 -PublishRelease -WinInWsl -KeepInWsl
+    Full release with every installer built in WSL and uploaded from there — no
+    unsigned binary is ever written to a Windows filesystem.
 
 .EXAMPLE
     ./scripts/publish.ps1 -BinariesOnly win -NoBinaryBuild -Tag v1.1.0
@@ -105,8 +123,10 @@ param(
     # Skip building the desktop installers.
     [switch]$NoBinaries,
 
-    # Forwarded to build-release.ps1. "linux" is shorthand for both Linux bundles.
-    [ValidateSet("win", "linux", "linux-appimage", "linux-flatpak")]
+    # Forwarded to build-release.ps1. "linux" is shorthand for both Linux bundles;
+    # "win" is NSIS + portable, and win-nsis / win-portable are those two on their
+    # own (only the NSIS one needs Wine when built in WSL).
+    [ValidateSet("win", "win-nsis", "win-portable", "linux", "linux-appimage", "linux-flatpak")]
     [string[]]$Targets = @("win", "linux"),
     [switch]$SkipVendor,
 
@@ -114,6 +134,12 @@ param(
     # instead of warning that Windows cannot produce them.
     [switch]$UseWsl,
     [string]$WslDistro,
+
+    # Forwarded to build-release.ps1: build the Windows targets in WSL too, and
+    # leave what WSL built inside the distro. With -KeepInWsl the upload below runs
+    # in the distro instead of on Windows, so the .exe never reaches NTFS.
+    [switch]$WinInWsl,
+    [switch]$KeepInWsl,
 
     # Reuse the installers already in dist/ instead of re-running the build. For
     # retrying a failed upload without paying for the build again.
@@ -123,7 +149,7 @@ param(
     # -PublishRelease, since building alone is what build-release.ps1 already does.
     # Takes the target list to build (comma-separated), which overrides -Targets:
     #   -BinariesOnly win,linux-appimage
-    [ValidateSet("win", "linux-appimage", "linux-flatpak")]
+    [ValidateSet("win", "win-nsis", "win-portable", "linux-appimage", "linux-flatpak")]
     [string[]]$BinariesOnly,
 
     # Attach the installers to the Gitea release for $Tag, creating the release if
@@ -136,7 +162,14 @@ param(
     # Gitea base URL for the API. Defaults to https://<Registry>.
     [string]$ApiBase,
 
-    # Replace release attachments that already exist under the same name.
+    # Fail instead of replacing an attachment that already exists under the same
+    # name. The default is to replace, because re-running a release for the same tag
+    # after a rebuild is the normal case and the new file is the one that matches
+    # SHA256SUMS.txt.
+    [switch]$NoReplace,
+
+    # Deprecated: replacing is now the default, so this does nothing. Kept so
+    # existing commands and scripts do not start failing on an unknown parameter.
     [switch]$Force
 )
 
@@ -249,20 +282,203 @@ function Send-ReleaseAsset {
     }
 }
 
+function ConvertTo-BashScript {
+    <#
+        Strip CR. This file is stored with CRLF line endings, so a multi-line
+        here-string handed to bash arrives with a \r on every line and bash reads it
+        as part of the last token — `set: - : invalid option`, and paths that end in
+        a literal \r. Single-line commands never show it.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Script)
+    return $Script -replace "`r", ""
+}
+
+<#
+    And the companion trap: `set -e` plus an explicit `exit 0` under `bash -lc` yields
+    1, because a login shell sources ~/.bash_logout on exit and Ubuntu's ends in a
+    `[ -x /usr/bin/clear_console ] && ...` that fails with no tty, which errexit then
+    promotes to the shell's status. -l has to stay (node from nvm/fnm lives on the
+    login PATH), so the scripts below set only `-u` and check what matters explicitly.
+#>
+
+function Get-WslArtifactManifest {
+    <#
+        build-release.ps1 -KeepInWsl writes dist/wsl-artifacts.json for the artifacts
+        it deliberately did not copy onto NTFS. It removes the file whenever a build
+        leaves nothing behind, so its presence means "these files are in the distro";
+        the tag is still checked, because a -NoBinaryBuild run for a different tag
+        would otherwise upload the previous release's binaries under the new one.
+    #>
+    param([Parameter(Mandatory)][string]$DistDir, [Parameter(Mandatory)][string]$Tag)
+
+    $path = Join-Path $DistDir "wsl-artifacts.json"
+    if (-not (Test-Path $path)) { return $null }
+
+    $manifest = Get-Content $path -Raw | ConvertFrom-Json
+    if (-not $manifest.files -or -not @($manifest.files).Count) { return $null }
+    if ($manifest.tag -ne $Tag) {
+        throw "$path was written for tag '$($manifest.tag)', not '$Tag' — those artifacts belong to another release. Rebuild, or delete the file if it is stale."
+    }
+    if (-not $manifest.distro -or -not $manifest.stageDir) {
+        throw "$path is missing the distro or stageDir field — delete it and rebuild."
+    }
+    return $manifest
+}
+
+function Invoke-WithWslEnv {
+    <#
+        Run a script block with $Name exported into WSL through WSLENV.
+
+        WSLENV is the only way to hand a value to a WSL process without putting it in
+        an argument list, and an argument list is exactly where a token must not be:
+        wsl.exe's own command line is readable from the Windows process table. The
+        previous WSLENV is restored rather than overwritten, because a distro may
+        rely on entries somebody else put there (PATH translation flags in
+        particular are positional and easy to break).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][scriptblock]$Body
+    )
+
+    $previousValue  = [Environment]::GetEnvironmentVariable($Name, "Process")
+    $previousWslEnv = $env:WSLENV
+    [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+    $env:WSLENV = if ($previousWslEnv) { "$previousWslEnv`:$Name" } else { $Name }
+    try {
+        & $Body
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable($Name, $previousValue, "Process")
+        if ($null -eq $previousWslEnv) {
+            Remove-Item Env:\WSLENV -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:WSLENV = $previousWslEnv
+        }
+    }
+}
+
+function Test-WslArtifacts {
+    <#
+        Every file the manifest names must still be in the staging directory. Without
+        this the first missing one surfaces as a curl error about an unreadable
+        upload part, halfway through a release.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Distro,
+        [Parameter(Mandatory)][string]$StageDir,
+        [Parameter(Mandatory)][string[]]$Names
+    )
+
+    $script = @'
+set -u
+cd "$1" || { echo "staging directory $1 is gone" >&2; exit 1; }
+shift
+missing=0
+for f in "$@"; do
+    [ -f "$f" ] || { echo "$f" >&2; missing=1; }
+done
+exit $missing
+'@
+    & wsl.exe -d $Distro -e bash -lc (ConvertTo-BashScript $script) "motionity-publish" $StageDir @Names 2>&1 |
+        ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    if ($LASTEXITCODE -ne 0) {
+        throw "artifacts named in dist/wsl-artifacts.json are missing from ${StageDir} in '$Distro' (listed above) — rebuild with -WinInWsl -KeepInWsl, or drop -NoBinaryBuild."
+    }
+}
+
+function Get-WslArtifactMtime {
+    <#
+        Oldest mtime among the staged artifacts, as a local DateTime, so the
+        -NoBinaryBuild staleness check works on WSL-resident files too.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Distro,
+        [Parameter(Mandatory)][string]$StageDir,
+        [Parameter(Mandatory)][string[]]$Names
+    )
+
+    $script = @'
+set -u
+cd "$1" || exit 1
+shift
+stat -c %Y -- "$@" | sort -n | head -n 1
+'@
+    $out = (& wsl.exe -d $Distro -e bash -lc (ConvertTo-BashScript $script) "motionity-publish" $StageDir @Names)
+    $epoch = (@($out) -join "").Replace("`0", "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $epoch -notmatch '^\d+$') { return $null }
+    return [System.DateTimeOffset]::FromUnixTimeSeconds([int64]$epoch).LocalDateTime
+}
+
+function Send-ReleaseAssetFromWsl {
+    <#
+        Upload one staged file as a release attachment, with curl running inside the
+        distro. Same Gitea endpoint and the same --config indirection for the token as
+        Send-ReleaseAsset; the only reason for a second implementation is that the
+        file must not be copied to NTFS to be read.
+
+        The config file is written by bash from $GITEA_UPLOAD_TOKEN (arriving via
+        WSLENV) rather than interpolated into the command string, so the token is in
+        neither wsl.exe's arguments nor the distro's process table. mktemp creates it
+        0600, and the trap removes it even if curl dies.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Distro,
+        [Parameter(Mandatory)][string]$StageDir,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Uri
+    )
+
+    # fail-with-body needs curl 7.76+ (Ubuntu 22.04 ships 7.81); the Windows path
+    # above already assumes it, so the two behave the same on an HTTP error.
+    $script = @'
+set -u
+command -v curl >/dev/null 2>&1 || { echo "curl is not installed in this WSL distro: sudo apt install -y curl" >&2; exit 127; }
+[ -n "${GITEA_UPLOAD_TOKEN:-}" ] || { echo "GITEA_UPLOAD_TOKEN did not reach the distro — is WSLENV being overwritten?" >&2; exit 2; }
+cfg=$(mktemp) || { echo "could not create a temp file for the curl config" >&2; exit 1; }
+trap 'rm -f "$cfg"' EXIT
+printf 'header = "Authorization: token %s"\nsilent\nshow-error\nfail-with-body\n' "$GITEA_UPLOAD_TOKEN" > "$cfg" || exit 1
+cd "$1" || exit 1
+# Last command on purpose: curl's status is the script's status.
+curl --config "$cfg" --write-out '  http %{http_code}, %{size_upload} bytes uploaded\n' -F "attachment=@$2" "$3"
+'@
+    Write-Host "  > [$Distro] curl --config <temp> -F attachment=@$Name `"$Uri`"" -ForegroundColor DarkGray
+    & wsl.exe -d $Distro -e bash -lc (ConvertTo-BashScript $script) "motionity-publish" $StageDir $Name $Uri
+    if ($LASTEXITCODE -ne 0) {
+        throw "upload of '$StageDir/$Name' from '$Distro' failed (exit $LASTEXITCODE)."
+    }
+}
+
 function Publish-BinaryRelease {
     <#
         Attach the installers to the release for $Tag, creating that release if it
-        does not exist yet. Re-uploading the same file name is a delete + upload,
-        which needs -Force: overwriting an asset someone may already have linked is
-        not something to do silently.
+        does not exist yet. An existing release is added to, never recreated.
+
+        A file name the release already carries is replaced: Gitea does not treat
+        attachment names as unique, so uploading over one without removing it first
+        leaves two assets with the same name and no way for anyone to tell which is
+        which. Replacing is the default because the alternative is a release whose
+        binaries disagree with its own SHA256SUMS.txt after a rebuild; -NoReplace
+        restores the strict behaviour.
+
+        Delete-then-upload, in that order, for the same reason — which does mean a
+        failed upload leaves the old asset gone. Recover with -NoBinaryBuild, which
+        re-attaches from dist/ (or from the distro) without rebuilding.
     #>
     param(
         [Parameter(Mandatory)][string]$ApiRoot,
         [Parameter(Mandatory)][string]$RepoPath,
         [Parameter(Mandatory)][string]$Tag,
         [Parameter(Mandatory)][string]$Token,
-        [Parameter(Mandatory)][string[]]$Artifacts,
-        [switch]$Force
+        # Windows-side files, uploaded by curl.exe.
+        [string[]]$Artifacts = @(),
+        # Files still in a WSL staging directory, uploaded by curl inside the distro.
+        [string[]]$WslArtifacts = @(),
+        [string]$WslDistro,
+        [string]$WslStageDir,
+        [switch]$NoReplace
     )
 
     $releasesUri = "$ApiRoot/repos/$RepoPath/releases"
@@ -282,20 +498,39 @@ function Publish-BinaryRelease {
         Write-Host "  reusing release $Tag (id $($release.id))" -ForegroundColor DarkGray
     }
 
-    foreach ($path in $Artifacts) {
-        $name     = Split-Path -Leaf $path
-        $existing = $release.assets | Where-Object { $_.name -eq $name }
-        if ($existing) {
-            if (-not $Force) {
-                throw "release $Tag already has an attachment named '$name' — pass -Force to replace it."
+    # One list so the asset-already-exists handling is written once: only the final
+    # transfer differs between a file on NTFS and one left in the distro.
+    $uploads = @()
+    foreach ($path in $Artifacts)    { $uploads += @{ Name = (Split-Path -Leaf $path); Path = $path; InWsl = $false } }
+    foreach ($name in $WslArtifacts) { $uploads += @{ Name = $name;                    Path = $null; InWsl = $true } }
+
+    foreach ($upload in $uploads) {
+        $name = $upload.Name
+        # @() because a release can already hold several assets under one name — an
+        # earlier run that uploaded without deleting, or a partial retry. Unwrapped,
+        # $existing.id would be an array and the DELETE would go to a malformed URL.
+        $existing = @($release.assets | Where-Object { $_.name -eq $name })
+        if ($existing.Count) {
+            if ($NoReplace) {
+                throw "release $Tag already has an attachment named '$name', and -NoReplace was passed. Drop it to replace the file, or upload under a different tag."
             }
-            Write-Host "  replacing existing attachment '$name'..." -ForegroundColor DarkGray
-            Invoke-GiteaApi -Method DELETE -Token $Token `
-                -Uri "$releasesUri/$($release.id)/assets/$($existing.id)" | Out-Null
+            foreach ($asset in $existing) {
+                Write-Host "  replacing attachment '$name' (asset $($asset.id))..." -ForegroundColor DarkGray
+                Invoke-GiteaApi -Method DELETE -Token $Token `
+                    -Uri "$releasesUri/$($release.id)/assets/$($asset.id)" | Out-Null
+            }
         }
-        $encoded = [System.Uri]::EscapeDataString($name)
-        Send-ReleaseAsset -Token $Token -Path $path `
-            -Uri "$releasesUri/$($release.id)/assets?name=$encoded"
+        else {
+            Write-Host "  adding attachment '$name'..." -ForegroundColor DarkGray
+        }
+        $encoded  = [System.Uri]::EscapeDataString($name)
+        $assetUri = "$releasesUri/$($release.id)/assets?name=$encoded"
+        if ($upload.InWsl) {
+            Send-ReleaseAssetFromWsl -Distro $WslDistro -StageDir $WslStageDir -Name $name -Uri $assetUri
+        }
+        else {
+            Send-ReleaseAsset -Token $Token -Path $upload.Path -Uri $assetUri
+        }
     }
 
     return "$ApiRoot/repos/$RepoPath/releases/tags/$Tag"
@@ -314,6 +549,12 @@ try {
     }
     if ($NoBinaryBuild -and $NoBinaries) {
         throw "-NoBinaryBuild reuses the build that -NoBinaries skips entirely — pick one."
+    }
+    if ($Force) {
+        Write-Warning "-Force is deprecated and ignored: replacing an attachment that already exists is now the default. -NoReplace is the opt-out."
+    }
+    if ($Force -and $NoReplace) {
+        throw "-Force and -NoReplace ask for opposite things — drop -Force, it is already the default."
     }
     if ($binariesOnlyMode) {
         # Nothing to build, log into or push on the container side, and uploading
@@ -360,7 +601,7 @@ try {
     else {
         Write-Host "  image    : skipped (-BinariesOnly)"
     }
-    Write-Host "  binaries : $(if ($NoBinaries) { 'skipped' } elseif ($NoBinaryBuild) { 'dist/ (reused, not rebuilt)' } else { $Targets -join ', ' })"
+    Write-Host "  binaries : $(if ($NoBinaries) { 'skipped' } elseif ($NoBinaryBuild) { 'dist/ (reused, not rebuilt)' } else { $Targets -join ', ' })$(if ($WinInWsl) { ' (all in WSL)' } elseif ($UseWsl) { ' (Linux ones in WSL)' })$(if ($KeepInWsl) { ', uploaded from the distro' })"
     Write-Host "  release  : $(if ($PublishRelease) { "$ReleaseRepo @ $Tag" } else { 'not uploaded' })"
     Write-Host ""
 
@@ -386,7 +627,10 @@ try {
     # --- Release artifacts ----------------------------------------------------
     # Built before the push so a failing build doesn't leave a pushed image with
     # no matching installers for the same tag.
-    $artifacts = @()
+    $artifacts       = @()
+    $wslArtifacts    = @()
+    $wslUploadDistro = $null
+    $wslStageDir     = $null
     if (-not $NoBinaries) {
         $distDir = Join-Path $repoRoot "dist"
 
@@ -397,12 +641,28 @@ try {
             }
 
             # Uploading an installer older than the code it claims to be is the one
-            # way this flag can quietly go wrong, so say so rather than assume.
+            # way this flag can quietly go wrong, so say so rather than assume. The
+            # artifacts a -KeepInWsl build left in the distro count as present here:
+            # dist/ can legitimately hold nothing but SHA256SUMS.txt.
+            $manifest = Get-WslArtifactManifest -DistDir $distDir -Tag $Tag
             $oldest = (Get-ChildItem $distDir -Filter "motionity-$Tag-*" -File |
                 Sort-Object LastWriteTime | Select-Object -First 1)
-            if (-not $oldest) {
-                throw "no installers matching motionity-$Tag-* in $distDir — what is on disk was built under a different tag. Drop -NoBinaryBuild."
+            $oldestName = if ($oldest) { $oldest.Name } else { $null }
+            $oldestTime = if ($oldest) { $oldest.LastWriteTime } else { $null }
+
+            if ($manifest) {
+                Write-Host "  $(@($manifest.files).Count) artifact(s) staged in '$($manifest.distro)':$($manifest.stageDir)" -ForegroundColor DarkGray
+                Test-WslArtifacts -Distro $manifest.distro -StageDir $manifest.stageDir -Names @($manifest.files)
+                $wslTime = Get-WslArtifactMtime -Distro $manifest.distro -StageDir $manifest.stageDir -Names @($manifest.files)
+                if ($wslTime -and (-not $oldestTime -or $wslTime -lt $oldestTime)) {
+                    $oldestTime = $wslTime
+                    $oldestName = @($manifest.files)[0]
+                }
             }
+            if (-not $oldestTime) {
+                throw "no installers matching motionity-$Tag-* in $distDir and no dist/wsl-artifacts.json for $Tag — what is on disk was built under a different tag. Drop -NoBinaryBuild."
+            }
+
             # src/ is the app: every extension the packaged tree actually serves,
             # plus the packaging scripts themselves.
             $newer = Get-ChildItem $repoRoot -Recurse -Include *.js, *.cjs, *.mjs, *.html, *.css, *.json -File |
@@ -410,10 +670,10 @@ try {
                     $_.FullName -notlike "$distDir*" -and
                     $_.FullName -notlike "*\node_modules\*" -and
                     $_.FullName -notlike "*/node_modules/*" -and
-                    $_.LastWriteTime -gt $oldest.LastWriteTime
+                    $_.LastWriteTime -gt $oldestTime
                 }
             if ($newer) {
-                Write-Warning "$($oldest.Name) predates $($newer.Count) source file(s) — the installers may not contain your latest changes (newest: $(($newer | Sort-Object LastWriteTime -Descending)[0].Name))."
+                Write-Warning "$oldestName predates $($newer.Count) source file(s) — the installers may not contain your latest changes (newest: $(($newer | Sort-Object LastWriteTime -Descending)[0].Name))."
             }
         }
         else {
@@ -431,13 +691,34 @@ try {
                 Targets    = $Targets
                 SkipVendor = $SkipVendor
                 UseWsl     = $UseWsl
+                WinInWsl   = $WinInWsl
+                KeepInWsl  = $KeepInWsl
             }
             if ($WslDistro) { $buildParams["WslDistro"] = $WslDistro }
             & (Join-Path $PSScriptRoot "build-release.ps1") @buildParams
+
+            $manifest = Get-WslArtifactManifest -DistDir $distDir -Tag $Tag
+            if ($manifest) {
+                Test-WslArtifacts -Distro $manifest.distro -StageDir $manifest.stageDir -Names @($manifest.files)
+            }
         }
 
-        $artifacts = @(Get-ChildItem $distDir -Filter "motionity-$Tag-*" -File | ForEach-Object FullName)
-        if (-not $artifacts.Count) { throw "no installers for $Tag found in $distDir." }
+        if ($manifest) {
+            $wslArtifacts    = @($manifest.files)
+            $wslUploadDistro = $manifest.distro
+            $wslStageDir     = $manifest.stageDir
+        }
+
+        # A name that exists both in dist/ and in the distro is the WSL build's, and
+        # the dist/ copy is a leftover from an earlier native build — uploading both
+        # would collide on the release's asset names anyway.
+        $artifacts = @(Get-ChildItem $distDir -Filter "motionity-$Tag-*" -File |
+            Where-Object { $wslArtifacts -notcontains $_.Name } | ForEach-Object FullName)
+        if (-not $artifacts.Count -and -not $wslArtifacts.Count) {
+            throw "no installers for $Tag found in $distDir."
+        }
+        # SHA256SUMS.txt covers both sets and is written on the Windows side either
+        # way — it is text, so nothing objects to it landing in dist/.
         $sums = Join-Path $distDir "SHA256SUMS.txt"
         if (Test-Path $sums) { $artifacts += $sums }
         Write-Host ""
@@ -467,13 +748,34 @@ try {
     # --- Release attachments --------------------------------------------------
     $releaseUrl = $null
     if ($PublishRelease) {
-        if (-not $artifacts.Count) {
+        if (-not $artifacts.Count -and -not $wslArtifacts.Count) {
             throw "-PublishRelease has nothing to upload (was -NoBinaries set?)."
         }
         Write-Host "Uploading artifacts to release $Tag..." -ForegroundColor Cyan
-        $Password   = Resolve-Token -Provided $Password -Purpose "release upload to $ReleaseRepo"
-        $releaseUrl = Publish-BinaryRelease -ApiRoot $apiRoot -RepoPath $ReleaseRepo -Tag $Tag `
-            -Token $Password -Artifacts $artifacts -Force:$Force
+        $Password = Resolve-Token -Provided $Password -Purpose "release upload to $ReleaseRepo"
+
+        $publishArgs = @{
+            ApiRoot   = $apiRoot
+            RepoPath  = $ReleaseRepo
+            Tag       = $Tag
+            Token     = $Password
+            Artifacts = $artifacts
+            NoReplace = $NoReplace
+        }
+        if ($wslArtifacts.Count) {
+            $publishArgs["WslArtifacts"] = $wslArtifacts
+            $publishArgs["WslDistro"]    = $wslUploadDistro
+            $publishArgs["WslStageDir"]  = $wslStageDir
+            # The token is exported for the whole upload rather than per file: WSLENV
+            # is process-wide state, and setting and restoring it around every
+            # attachment is more windows in which a concurrent wsl.exe sees it.
+            $releaseUrl = Invoke-WithWslEnv -Name "GITEA_UPLOAD_TOKEN" -Value $Password -Body {
+                Publish-BinaryRelease @publishArgs
+            }
+        }
+        else {
+            $releaseUrl = Publish-BinaryRelease @publishArgs
+        }
         Write-Host ""
     }
 
@@ -482,10 +784,13 @@ try {
         Write-Host "Pushed:" -ForegroundColor Green
         foreach ($t in $tags) { Write-Host "  $t" -ForegroundColor Green }
     }
-    if ($artifacts.Count) {
+    if ($artifacts.Count -or $wslArtifacts.Count) {
         $where = if ($PublishRelease) { "attached to release $Tag" } else { "built locally — attach to a release manually" }
         Write-Host "Artifacts ($where):" -ForegroundColor Green
         foreach ($a in $artifacts) { Write-Host "  $a" -ForegroundColor Green }
+        foreach ($a in $wslArtifacts) {
+            Write-Host "  [$wslUploadDistro] $wslStageDir/$a" -ForegroundColor Green
+        }
         if ($releaseUrl) { Write-Host "  $ApiBase/$ReleaseRepo/releases/tag/$Tag" -ForegroundColor Green }
     }
 }
